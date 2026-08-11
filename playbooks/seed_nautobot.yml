@@ -1,0 +1,194 @@
+---
+# Stage 1a — populate Nautobot with the Stage 0 topology.
+#
+# WHAT THIS IS: an ordinary Ansible playbook, but a different shape from
+# configure_base.yml. It runs against `localhost` and talks to Nautobot's REST
+# API through the networktocode.nautobot modules. It never touches leaf1/leaf2 —
+# the devices don't even need to be running.
+#
+# HOW TO RUN:
+#   export NAUTOBOT_URL="http://localhost:8080"
+#   export NAUTOBOT_TOKEN="<your-token>"
+#   ansible-playbook playbooks/seed_nautobot.yml
+#
+# No -i inventory needed: the play targets localhost. No -u/-k either: auth is
+# the Nautobot API token, not SSH.
+#
+# It is idempotent — safe to re-run. That matters, because you will iterate on
+# it, and because it is the seed of the eventual `reset.sh` for Lab 1.
+#
+# ORDER MATTERS. Nautobot enforces referential integrity, so parents come first:
+#   LocationType → Location → Manufacturer → Platform → DeviceType → Role
+#   → Device → Interface → Prefix → IPAddress → bind IP → set primary_ip4
+
+- name: Seed Nautobot with the POC topology
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # YAML anchor: the collection defines no module_defaults action group, so
+    # url/token must be passed to every task. `<<: *nb` merges them in.
+    nb: &nb
+      url: "{{ lookup('env', 'NAUTOBOT_URL') }}"
+      token: "{{ lookup('env', 'NAUTOBOT_TOKEN') }}"
+
+    site_name: DC1
+    mgmt_prefix: 172.20.20.0/24
+    mgmt_interface: Management0
+
+    # Keep in sync with inventory/static.ini until Lab 1 makes that file obsolete.
+    poc_devices:
+      - name: leaf1
+        mgmt_ip: 172.20.20.3/24
+      - name: leaf2
+        mgmt_ip: 172.20.20.2/24
+
+  tasks:
+    - name: Fail early if credentials are missing
+      ansible.builtin.assert:
+        that:
+          - nautobot_url | default(lookup('env', 'NAUTOBOT_URL'), true) | length > 0
+          - lookup('env', 'NAUTOBOT_TOKEN') | length > 0
+        fail_msg: >-
+          NAUTOBOT_URL and NAUTOBOT_TOKEN must be exported. See the header of
+          this file.
+
+    # ---------------------------------------------------------------- location
+    - name: Location type
+      networktocode.nautobot.location_type:
+        <<: *nb
+        name: Site
+        content_types:
+          - dcim.device
+        state: present
+
+    - name: Location
+      networktocode.nautobot.location:
+        <<: *nb
+        name: "{{ site_name }}"
+        location_type: Site
+        status: Active
+        state: present
+
+    # ------------------------------------------------------------ device model
+    - name: Manufacturer
+      networktocode.nautobot.manufacturer:
+        <<: *nb
+        name: Arista
+        state: present
+
+    - name: Platform
+      networktocode.nautobot.platform:
+        <<: *nb
+        name: Arista EOS
+        manufacturer: Arista
+        # netutils driver name. Stage 1b's inventory `compose:` should read the
+        # Ansible mapping off this rather than using the raw value — see the
+        # note in tutorial.md Stage 1b about network_driver_mappings.
+        network_driver: arista_eos
+        state: present
+
+    - name: Device type
+      networktocode.nautobot.device_type:
+        <<: *nb
+        model: cEOSLab
+        manufacturer: Arista
+        u_height: 1
+        state: present
+
+    - name: Role
+      networktocode.nautobot.role:
+        <<: *nb
+        name: leaf
+        content_types:
+          - dcim.device
+        state: present
+
+    # ----------------------------------------------------------------- devices
+    - name: Devices
+      networktocode.nautobot.device:
+        <<: *nb
+        name: "{{ item.name }}"
+        device_type: cEOSLab
+        role: leaf
+        platform: Arista EOS
+        location: "{{ site_name }}"
+        status: Active
+        state: present
+      loop: "{{ poc_devices }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # -------------------------------------------------------------------- IPAM
+    # IPAM comes BEFORE the interfaces, because the interface task binds the
+    # addresses inline and they must already exist.
+    #
+    # Nautobot 2.x+ scopes IPs inside a Namespace. "Global" ships by default.
+    - name: Management prefix
+      networktocode.nautobot.prefix:
+        <<: *nb
+        prefix: "{{ mgmt_prefix }}"
+        namespace: Global
+        status: Active
+        state: present
+
+    - name: Management IP addresses
+      networktocode.nautobot.ip_address:
+        <<: *nb
+        address: "{{ item.mgmt_ip }}"
+        namespace: Global
+        status: Active
+        state: present
+      loop: "{{ poc_devices }}"
+      loop_control:
+        label: "{{ item.mgmt_ip }}"
+
+    # Interface creation AND IP binding in one task.
+    #
+    # Do NOT use networktocode.nautobot.ip_address_to_interface here: it is
+    # deprecated in 6.2.0 (removal in 7.0.0) and it has no `device` parameter,
+    # so there is no way to disambiguate "Management0 on leaf1" from
+    # "Management0 on leaf2". The `ip_addresses` option below replaces it and
+    # was added in exactly 6.2.0.
+    #
+    # `ip_addresses` is a DICT, not a list:
+    #   state:   merge (default) | replace | delete
+    #   objects: list of dicts, each with an `ip_address` key
+    - name: Management interfaces (with IPs bound)
+      networktocode.nautobot.device_interface:
+        <<: *nb
+        device: "{{ item.name }}"
+        name: "{{ mgmt_interface }}"
+        type: 1000base-t
+        mgmt_only: true
+        status: Active
+        ip_addresses:
+          state: merge
+          objects:
+            - ip_address: "{{ item.mgmt_ip }}"
+        state: present
+      loop: "{{ poc_devices }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Must come last: the IP has to exist and be bound before it can be primary.
+    # Stage 1b's dynamic inventory reads primary_ip4 to build ansible_host, so
+    # if this task fails, Lab 1 produces hosts with no address.
+    - name: Set primary IPv4
+      networktocode.nautobot.device:
+        <<: *nb
+        name: "{{ item.name }}"
+        primary_ip4: "{{ item.mgmt_ip }}"
+        state: present
+      loop: "{{ poc_devices }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # ------------------------------------------------------------ verification
+    - name: Next step
+      ansible.builtin.debug:
+        msg: >-
+          Seeded {{ poc_devices | length }} devices at {{ site_name }}.
+          Check the Nautobot UI (Devices), then move to Stage 1b:
+          ansible-inventory -i inventory/nautobot.yml --graph
