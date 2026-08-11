@@ -73,6 +73,53 @@ Drop `--check` once the diff looks right.
 > `admin`/`admin`, but it varies by version and injected startup config. Confirm
 > with `ssh admin@<node-ip>` before blaming Ansible.
 
+> ### ⚠️ Seen once, cause unresolved: "Too many authentication failures"
+>
+> ```
+> Failed to authenticate public key: Received SSH_MSG_DISCONNECT:
+> 2:Too many authentication failures
+> ```
+>
+> Hit once during the POC; **went away on a retry after the password was
+> re-entered**, so the real cause was never isolated. Two candidates, both
+> plausible:
+>
+> 1. **A mistyped password.** Failed password attempts also count against
+>    `MaxAuthTries`, and can surface as "too many authentication failures."
+> 2. **SSH key exhaustion.** The client offers every key in `~/.ssh` and
+>    `ssh-agent` before falling back to password; each offer burns one of the
+>    device's `MaxAuthTries` (OpenSSH default 6). `-k` supplies the password but
+>    does not stop keys being offered.
+>
+> The error text naming *public key* points at (2), but libssh error strings are
+> not always precise about which method failed. **Try the password again first** —
+> it's the cheaper hypothesis.
+>
+> **The repo already carries the (2) mitigation** — `look_for_keys = False` under
+> `[paramiko_connection]` in `ansible.cfg`, plus
+> `ansible_network_cli_ssh_type=paramiko` in the inventory. That's sound practice
+> for `network_cli` regardless, so it stays, but treat it as precautionary rather
+> than a proven fix.
+>
+> **If it recurs, disambiguate:**
+>
+> ```bash
+> ssh-add -l                                   # how many keys are in play?
+> SSH_AUTH_SOCK= ansible -i inventory/static.ini leaf \
+>   -m arista.eos.eos_facts -u admin -k        # same run, agent hidden
+> ```
+>
+> If hiding the agent is what makes it pass, it's key exhaustion.
+>
+> ⚠️ **`[ssh_connection] ssh_args` does NOT affect this** either way.
+> `network_cli` uses paramiko/libssh, not OpenSSH, so `-o PubkeyAuthentication=no`
+> there is ignored — the most common wrong turn on this error.
+>
+> **Lab design note:** worth pinning down before the lab guide is written. If it's
+> key exhaustion, 60 attendees testing locally will meet it and the guide needs the
+> workaround. If it was only a typo, the guide shouldn't carry a scary SSH section
+> for a non-problem.
+
 ### 3. Push, then point AWX at it
 
 ```bash
