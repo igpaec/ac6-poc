@@ -1,0 +1,26 @@
+---
+# AWX installs these at project sync time — but ONLY if the Project's
+# Organization has a Galaxy credential attached. Check:
+#   Access → Organizations → Default → Galaxy Credentials
+# AWX ships an "Ansible Galaxy" credential that is often not attached by
+# default. Without it the sync succeeds, collections silently do not install,
+# and the job later fails with:
+#   couldn't resolve module/action 'arista.eos.eos_config'
+#
+# Phase 2 note: for 60 attendees, do NOT install collections at sync time.
+# Bake them into a custom execution environment with ansible-builder — same
+# reasoning as mirroring container images.
+
+collections:
+  - name: arista.eos
+    version: ">=12.2.0"
+
+  # Not used in Stage 0, but present from the start so the EE/collection set
+  # does not change between stages. Lab 1 onward depends on it.
+  - name: networktocode.nautobot
+    version: ">=6.2.0"
+
+  # Pulled in as a dependency of arista.eos, pinned explicitly so the
+  # network_cli connection plugin version is predictable.
+  - name: ansible.netcommon
+    version: ">=6.0.0"

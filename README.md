@@ -1,0 +1,130 @@
+# ac6-poc — Stage 0: the disconnected baseline
+
+POC repo for the AutoCon 6 workshop *From Intent to Execution: Driving Ansible AWX
+from Nautobot*.
+
+**This is deliberately the "wrong" version.** A static inventory, `group_vars`,
+and a six-field survey — a setup that works and is obviously disconnected from the
+network's source of truth. Later stages dismantle it piece by piece:
+
+| Stage | What it removes |
+| --- | --- |
+| Lab 1 | `inventory/static.ini` → Nautobot dynamic inventory |
+| Lab 2 | `inventory/group_vars/` → Nautobot Config Contexts, and the survey |
+| Lab 3 | one-way flow → playbooks write state back to Nautobot |
+| Lab 4 | manual launch → Nautobot event fires a gated AWX workflow |
+
+`playbooks/configure_base.yml` does **not** change across those stages. That's the
+point — keep it stable.
+
+## Layout
+
+```
+ac6-poc/
+├── ansible.cfg
+├── clab/
+│   └── poc.clab.yml              # 2 × Arista cEOS
+├── collections/
+│   └── requirements.yml
+├── inventory/
+│   ├── static.ini
+│   └── group_vars/
+│       └── leaf.yml              # beside the inventory, NOT at repo root
+├── playbooks/
+│   └── configure_base.yml
+└── templates/
+    └── base.j2
+```
+
+> **`group_vars` placement is load-bearing.** Ansible resolves `group_vars/`
+> relative to the inventory file's directory or the playbook's directory — never
+> the repo root. Moved to the root, it is silently ignored and looks exactly like
+> "my variables aren't applying."
+
+## Quick start
+
+### 1. Devices
+
+```bash
+docker import cEOSarm-lab-4.34.2F.tar.xz ceos:4.34.2F
+sudo containerlab deploy -t clab/poc.clab.yml
+sudo containerlab inspect -t clab/poc.clab.yml
+```
+
+Update `ansible_host` in `inventory/static.ini` to match the reported IPs.
+
+### 2. Prove it locally — before AWX
+
+This separates "is the playbook right?" from "can AWX reach the devices?" — two
+failure modes that are miserable to debug together.
+
+```bash
+ansible-galaxy collection install -r collections/requirements.yml
+
+ansible -i inventory/static.ini leaf -m arista.eos.eos_facts -u admin -k
+
+ansible-playbook -i inventory/static.ini playbooks/configure_base.yml \
+  -u admin -k --check --diff
+```
+
+Drop `--check` once the diff looks right.
+
+> ⚠️ **Verify cEOS credentials.** ContainerLab cEOS nodes commonly come up
+> `admin`/`admin`, but it varies by version and injected startup config. Confirm
+> with `ssh admin@<node-ip>` before blaming Ansible.
+
+### 3. Push, then point AWX at it
+
+```bash
+git init && git add . && git commit -m "Stage 0: disconnected baseline"
+gh repo create ac6-poc --public --source=. --push
+```
+
+Then in AWX, in this order: **Project** → **Inventory** → **Inventory Source**
+(*Sourced from a Project*, file `inventory/static.ini`) → **Machine Credential** →
+**Job Template** (playbook `playbooks/configure_base.yml`) → **Survey**.
+
+Full walkthrough with field-by-field values: `../tutorial.md`, Stage 0d.
+
+## Survey
+
+Enable *Survey* on the Job Template and add these six. Every one is a fact
+Nautobot already knows — which is the argument the workshop makes.
+
+| Prompt | Variable | Type | Default |
+| --- | --- | --- | --- |
+| Site name | `site_name` | Text | `DC1` |
+| Primary NTP server | `ntp_primary` | Text | `10.0.0.1` |
+| Secondary NTP server | `ntp_secondary` | Text | `10.0.0.2` |
+| SNMP community | `snmp_community` | Text | `public` |
+| DNS server | `dns_server` | Text | `10.0.0.53` |
+| Syslog host | `syslog_host` | Text | `10.0.0.10` |
+
+The playbook maps the flat survey answers onto the list-shaped template variables,
+falling back to `group_vars` when run locally without a survey. Survey answers
+arrive as extra_vars and outrank `group_vars` — an operator's typing beats the
+source of truth, which is exactly the problem being dramatized.
+
+## Gotchas that cost real time
+
+1. **AWX never reads files from your laptop.** Projects sync from Git. That's why
+   the repo comes before the AWX objects.
+2. **Galaxy credential.** AWX installs `collections/requirements.yml` only if the
+   Project's Organization has a Galaxy credential attached (*Access → Organizations
+   → Default → Galaxy Credentials*). Without it, sync succeeds, collections
+   silently don't install, and the job dies with
+   `couldn't resolve module/action 'arista.eos.eos_config'`.
+3. **AWX pods must reach the devices.** AWX runs in Kubernetes; cEOS runs under
+   ContainerLab — different Docker networks, no connectivity by default. Run both
+   against the same Docker host, bridge the networks, and test from inside a pod
+   before building AWX objects:
+```bash
+   kubectl -n awx run nettest --rm -it --restart=Never \
+     --image=busybox -- ping -c3 172.20.20.11
+```
+
+## POC shortcuts — do NOT carry into the lab
+
+Single shared admin token · HTTP not HTTPS · no RBAC · no TLS on webhooks ·
+`host_key_checking = False` · secrets in plain extra_vars where the workshop will
+use Nautobot Secrets Groups.

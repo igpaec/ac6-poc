@@ -1,0 +1,20 @@
+# ContainerLab runtime artifacts
+clab-*/
+.clab-*
+*.clab.yml.bak
+
+# Ansible
+*.retry
+collections/ansible_collections/
+rendered/
+
+# Never commit these — the POC uses a shared admin token, which is exactly the
+# shortcut that must NOT survive into the lab
+.env
+*.token
+secrets.yml
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

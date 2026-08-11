@@ -1,0 +1,28 @@
+# ContainerLab topology for the POC — 2 Arista cEOS nodes.
+#
+# Import the image first (cEOS ships as a filesystem tarball, so `docker import`,
+# NOT `docker load`):
+#   docker import cEOSarm-lab-4.34.2F.tar.xz ceos:4.34.2F
+#   docker image inspect ceos:4.34.2F --format '{{.Architecture}}/{{.Os}}'
+#
+# Deploy:
+#   sudo containerlab deploy -t clab/poc.clab.yml
+#   sudo containerlab inspect -t clab/poc.clab.yml   # -> IPs for inventory/static.ini
+#
+# NOTE: the POC uses the ARM64 build (Apple Silicon). Lab infrastructure will be
+# x86_64 and needs the non-ARM cEOS image at the SAME version (4.34.2F) so POC
+# findings transfer.
+
+name: ac6-poc
+
+topology:
+  nodes:
+    leaf1:
+      kind: arista_ceos
+      image: ceos:4.34.2F
+    leaf2:
+      kind: arista_ceos
+      image: ceos:4.34.2F
+
+  links:
+    - endpoints: ["leaf1:eth1", "leaf2:eth1"]
