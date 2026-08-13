@@ -43,6 +43,16 @@ validate_certs: false
 # being on, so it is enabled from the start.
 config_context: true
 
+# REQUIRED for Lab 2's payoff. Without this, the context arrives nested as a
+# `config_context` dict, so the template would have to say
+# `config_context.ntp_servers` — i.e. templates/base.j2 would have to CHANGE when
+# group_vars/leaf.yml is deleted, which destroys the "same playbook, same
+# template, nothing else changed" argument.
+#
+# With flatten on, the context keys land directly on the host, so `ntp_servers`
+# resolves exactly as it did from group_vars and the template is untouched.
+flatten_config_context: true
+
 # ---------------------------------------------------------------- group naming
 #
 # These two options together decide what the groups are CALLED, which decides
