@@ -1,5 +1,6 @@
-query ($device_id: ID!) {
-  device(id: $device_id) {
+query ($device_name: [String]) {
+  devices(name: $device_name) {
+    id
     name
     role { name }
     location { name }
