@@ -1,0 +1,50 @@
+{#
+  Stage 2b — rendered entirely from ONE GraphQL response.
+
+  Every value below comes from `device`, which is the result of a single query
+  against Nautobot. No REST round-trips, no group_vars, no survey.
+
+  `default()` guards are deliberate: a Config Context need not define every key,
+  and a lab device need not have VLANs or descriptions. A template that explodes
+  on the first missing optional field is a bad demo in front of 60 people.
+#}
+hostname {{ device.name }}
+!
+{% if device.config_context is defined and device.config_context %}
+{% for server in device.config_context.get('ntp_servers', []) %}
+ntp server {{ server }}
+{% endfor %}
+!
+{% for server in device.config_context.get('dns_servers', []) %}
+ip name-server {{ server }}
+{% endfor %}
+!
+{% if device.config_context.get('snmp_community') %}
+snmp-server community {{ device.config_context['snmp_community'] }} ro
+{% endif %}
+{% if device.config_context.get('syslog_host') %}
+logging host {{ device.config_context['syslog_host'] }}
+{% endif %}
+{% endif %}
+!
+{% for intf in device.interfaces | default([]) %}
+interface {{ intf.name }}
+{% if intf.description %}
+   description {{ intf.description }}
+{% else %}
+   description managed by Nautobot
+{% endif %}
+{% for ip in intf.ip_addresses | default([]) %}
+   ip address {{ ip.address }}
+{% endfor %}
+{% if intf.untagged_vlan %}
+   switchport access vlan {{ intf.untagged_vlan.vid }}
+{% endif %}
+{% if intf.tagged_vlans %}
+   switchport trunk allowed vlan {{ intf.tagged_vlans | map(attribute='vid') | join(',') }}
+{% endif %}
+{% if not intf.enabled %}
+   shutdown
+{% endif %}
+!
+{% endfor %}
