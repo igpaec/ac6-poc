@@ -1,26 +1,19 @@
 ---
 # Stage 2c — diff Nautobot's intent against what is actually on the device.
-#
-# THE BEAT: intent lives in Nautobot; the diff is against reality. Nothing is
+#   THE BEAT: intent lives in Nautobot; the diff is against reality. Nothing is
 # changed unless you explicitly ask.
-#
-# Self-contained: fetches intent via GraphQL, renders the same template used in
+#   Self-contained: fetches intent via GraphQL, renders the same template used in
 # Stage 2b, and compares it to the running config. No dependency on having run
 # render_intent.yml first.
-#
-# HOW TO RUN — check mode is the DEFAULT, so this is safe:
+#   HOW TO RUN — check mode is the DEFAULT, so this is safe:
 #   export NAUTOBOT_URL="http://localhost:8080"
 #   export NAUTOBOT_TOKEN="<token>"
-#   ansible-playbook -i inventory/nautobot.yml playbooks/diff_intent.yml \
-#     -u admin -k --diff
-#
-# To actually apply what the diff showed:
+#   ansible-playbook -i inventory/nautobot.yml playbooks/diff_intent.yml -u admin -k --diff
+#   To actually apply what the diff showed:
 #   ... -u admin -k --diff -e apply=true
-#
-# NOTE: unlike Stage 2b, this one DOES need the devices reachable — it reads the
+#   NOTE: unlike Stage 2b, this one DOES need the devices reachable — it reads the
 # running config over network_cli.
-#
-# WHY NOT diff_against: intended?
+#   WHY NOT diff_against: intended?
 #   `diff_against: intended` compares the device's ENTIRE running config against
 #   a complete intended config. templates/full_config.j2 is a PARTIAL config
 #   (hostname, NTP, DNS, SNMP, syslog, interfaces), so that mode would report

@@ -54,6 +54,36 @@
           NAUTOBOT_URL and NAUTOBOT_TOKEN must be exported. See the header of
           this file.
 
+    # ----------------------------------------------- custom fields (Stage 3)
+    # Schema setup, so it belongs here rather than in the write-back playbook.
+    # Nautobot 2.x+ uses `key` (the old `slug`) as the programmatic name — that
+    # is what `custom_fields:` refers to when writing values.
+    - name: Custom field — AWX job ID
+      networktocode.nautobot.custom_field:
+        <<: *nb
+        key: awx_job_id
+        label: AWX Job ID
+        type: text
+        content_types:
+          - dcim.device
+        description: >-
+          Set by playbooks/write_back.yml. Links this device to the AWX job that
+          last touched it — the correlation Lab 4 closes the loop on.
+        state: present
+
+    - name: Custom field — discovered LLDP neighbors
+      networktocode.nautobot.custom_field:
+        <<: *nb
+        key: lldp_neighbors
+        label: LLDP Neighbors (discovered)
+        type: json
+        content_types:
+          - dcim.device
+        description: >-
+          Discovered at runtime and written back. A JSON field rather than real
+          Cable objects on purpose — see write_back.yml for the reasoning.
+        state: present
+
     # ---------------------------------------------------------------- location
     - name: Location type
       networktocode.nautobot.location_type:

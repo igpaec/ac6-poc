@@ -63,8 +63,7 @@ ansible-galaxy collection install -r collections/requirements.yml
 
 ansible -i inventory/static.ini leaf -m arista.eos.eos_facts -u admin -k
 
-ansible-playbook -i inventory/static.ini playbooks/configure_base.yml \
-  -u admin -k --check --diff
+ansible-playbook -i inventory/static.ini playbooks/configure_base.yml -u admin -k --check --diff
 ```
 
 Drop `--check` once the diff looks right.
@@ -105,8 +104,7 @@ Drop `--check` once the diff looks right.
 >
 > ```bash
 > ssh-add -l                                   # how many keys are in play?
-> SSH_AUTH_SOCK= ansible -i inventory/static.ini leaf \
->   -m arista.eos.eos_facts -u admin -k        # same run, agent hidden
+> SSH_AUTH_SOCK= ansible -i inventory/static.ini leaf -m arista.eos.eos_facts -u admin -k
 > ```
 >
 > If hiding the agent is what makes it pass, it's key exhaustion.
@@ -166,8 +164,7 @@ source of truth, which is exactly the problem being dramatized.
    against the same Docker host, bridge the networks, and test from inside a pod
    before building AWX objects:
 ```bash
-   kubectl -n awx run nettest --rm -it --restart=Never \
-     --image=busybox -- ping -c3 172.20.20.11
+kubectl -n awx run nettest --rm -it --restart=Never --image=busybox -- ping -c3 172.20.20.11
 ```
 
 ## POC shortcuts — do NOT carry into the lab

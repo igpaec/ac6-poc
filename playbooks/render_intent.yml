@@ -1,23 +1,18 @@
 ---
 # Stage 2b — fetch a device's full intent in ONE GraphQL query, then render it.
-#
-# WHAT THIS DEMONSTRATES: instead of many REST round-trips (device, then role,
+#   WHAT THIS DEMONSTRATES: instead of many REST round-trips (device, then role,
 # then platform, then interfaces, then IPs...), a single GraphQL call returns
 # exactly the shape the template needs. That is the "one query drives the config"
 # beat of Lab 2.
-#
-# HOW TO RUN:
+#   HOW TO RUN:
 #   export NAUTOBOT_URL="http://localhost:8080"
 #   export NAUTOBOT_TOKEN="<token>"
 #   ansible-playbook -i inventory/nautobot.yml playbooks/render_intent.yml
-#
-# NOTE: no -u / -k needed. Every task is delegated to localhost, so this never
+#   NOTE: no -u / -k needed. Every task is delegated to localhost, so this never
 # touches the devices — it only reads Nautobot and writes files locally. The
 # devices don't even have to be running.
-#
-# To inspect the raw response shape (useful on the first run, see below):
-#   ansible-playbook -i inventory/nautobot.yml playbooks/render_intent.yml \
-#     -e show_raw=true
+#   To inspect the raw response shape (useful on the first run, see below):
+#   ansible-playbook -i inventory/nautobot.yml playbooks/render_intent.yml -e show_raw=true
 
 - name: Render config from Nautobot intent
   hosts: all

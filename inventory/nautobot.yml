@@ -1,35 +1,26 @@
 ---
 # Stage 1b — the Nautobot dynamic inventory that replaces static.ini.
-#
-# ⚠️ THIS FILE IS INTENTIONALLY EXECUTABLE (mode 755). Do not "fix" it.
-#
-# AWX will not offer a .yml file in its Inventory-file dropdown. From
+#   ⚠️ THIS FILE IS INTENTIONALLY EXECUTABLE (mode 755). Do not "fix" it.
+#   AWX will not offer a .yml file in its Inventory-file dropdown. From
 # awx/main/utils/ansible.py::could_be_inventory(), a candidate is accepted only
 # if it is named exactly `inventory`/`hosts`, ends in `.ini`, OR is executable —
 # any other extension is rejected outright. Which excludes every modern
 # plugin-based inventory, since they are all .yml.
-#
-# The exec bit is the least invasive way through: no rename, no restructure, and
+#   The exec bit is the least invasive way through: no rename, no restructure, and
 # git preserves the mode. Verified working in the POC.
-#
 #   chmod +x inventory/nautobot.yml
 #   git update-index --chmod=+x inventory/nautobot.yml
-#
-# For the workshop itself, don't rely on this at all — pre-create both AWX
+#   For the workshop itself, don't rely on this at all — pre-create both AWX
 # Inventories during provisioning and have attendees switch the Job Template's
 # Inventory field, which uses no file detection.
-#
-# HOW TO USE (locally):
+#   HOW TO USE (locally):
 #   export NAUTOBOT_URL="http://localhost:8080"
 #   export NAUTOBOT_TOKEN="<token>"
 #   ansible-inventory -i inventory/nautobot.yml --graph
 #   ansible-inventory -i inventory/nautobot.yml --host leaf1
-#
-# Then the payoff — the SAME playbook, unchanged, against the new inventory:
-#   ansible-playbook -i inventory/nautobot.yml playbooks/configure_base.yml \
-#     -u admin -k --check --diff
-#
-# NOTE: api_endpoint and token are deliberately NOT written here. Both options
+#   Then the payoff — the SAME playbook, unchanged, against the new inventory:
+#   ansible-playbook -i inventory/nautobot.yml playbooks/configure_base.yml -u admin -k --check --diff
+#   NOTE: api_endpoint and token are deliberately NOT written here. Both options
 # read environment variables natively (NAUTOBOT_URL / NAUTOBOT_TOKEN), which
 # keeps the token out of git AND lets the same file work in two places: locally
 # it points at localhost, while in AWX a custom credential injects a URL that is
@@ -48,18 +39,15 @@ config_context: true
 # `config_context.ntp_servers` — i.e. templates/base.j2 would have to CHANGE when
 # group_vars/leaf.yml is deleted, which destroys the "same playbook, same
 # template, nothing else changed" argument.
-#
-# With flatten on, the context keys land directly on the host, so `ntp_servers`
+#   With flatten on, the context keys land directly on the host, so `ntp_servers`
 # resolves exactly as it did from group_vars and the template is untouched.
 flatten_config_context: true
 
 # ---------------------------------------------------------------- group naming
-#
-# These two options together decide what the groups are CALLED, which decides
+#   These two options together decide what the groups are CALLED, which decides
 # whether inventory/group_vars/leaf.yml still applies. Getting them wrong is the
 # most likely reason Lab 1 "works" but variables silently stop resolving.
-#
-# plurals: true (the DEFAULT) does two things you probably don't want:
+#   plurals: true (the DEFAULT) does two things you probably don't want:
 #   1. group_by choices must be plural (device_roles, locations, platforms)
 #   2. every hostvar is wrapped in a single-element array, for legacy
 #      compatibility with very old versions of this plugin
@@ -68,8 +56,7 @@ plurals: false
 
 # group_names_raw: true drops the "role_" / "location_" prefix from group names,
 # so the role group is literally `leaf` rather than `role_leaf`.
-#
-# THIS IS WHAT KEEPS inventory/group_vars/leaf.yml WORKING. With the default
+#   THIS IS WHAT KEEPS inventory/group_vars/leaf.yml WORKING. With the default
 # (false) the group would be `role_leaf`, group_vars/leaf.yml would match
 # nothing, and the play would fail its assert with no obvious cause.
 group_names_raw: true
@@ -80,14 +67,11 @@ group_by:
   - platform
 
 # ------------------------------------------------------------------- host vars
-#
-# compose values are Jinja2 EXPRESSIONS, not plain values.
-#
-# ONLY put things here that are genuinely DERIVED FROM NAUTOBOT. Connection
+#   compose values are Jinja2 EXPRESSIONS, not plain values.
+#   ONLY put things here that are genuinely DERIVED FROM NAUTOBOT. Connection
 # plumbing (ansible_connection / ansible_network_os / ansible_become) lives in
 # inventory/group_vars/all.yml instead.
-#
-# Learned the hard way: a bare YAML boolean here (`ansible_become: true`) does
+#   Learned the hard way: a bare YAML boolean here (`ansible_become: true`) does
 # not template reliably and is silently dropped. The only symptom is
 # "operation requires privilege escalation" from the first module needing enable
 # mode — every other connection var works, so it looks like anything but a
@@ -98,8 +82,7 @@ compose:
   ansible_host: primary_ip4.address.split('/')[0]
 
 # --------------------------------------------------------------- var renaming
-#
-# The plugin exposes a `tags` hostvar, which collides with Ansible's reserved
+#   The plugin exposes a `tags` hostvar, which collides with Ansible's reserved
 # `tags` and produces:
 #   [WARNING]: Found variable using reserved name 'tags'
 # Harmless, but noisy and confusing in a workshop. Rename it out of the way.
@@ -108,11 +91,9 @@ rename_variables:
     repl: "nautobot_tags"
 
 # ---------------------------------------------------------------------- filters
-#
-# Restrict to active devices. Commented out pending a format check: the option
+#   Restrict to active devices. Commented out pending a format check: the option
 # is declared `elements: str`, so entries are query-string fragments
 # ("status=active"), NOT the `- status: active` mapping form used by some other
 # inventory plugins. Enable once verified against your Nautobot.
-#
-# device_query_filters:
+#   device_query_filters:
 #   - "status=active"
