@@ -1,6 +1,24 @@
 ---
 # Stage 1b — the Nautobot dynamic inventory that replaces static.ini.
 #
+# ⚠️ THIS FILE IS INTENTIONALLY EXECUTABLE (mode 755). Do not "fix" it.
+#
+# AWX will not offer a .yml file in its Inventory-file dropdown. From
+# awx/main/utils/ansible.py::could_be_inventory(), a candidate is accepted only
+# if it is named exactly `inventory`/`hosts`, ends in `.ini`, OR is executable —
+# any other extension is rejected outright. Which excludes every modern
+# plugin-based inventory, since they are all .yml.
+#
+# The exec bit is the least invasive way through: no rename, no restructure, and
+# git preserves the mode. Verified working in the POC.
+#
+#   chmod +x inventory/nautobot.yml
+#   git update-index --chmod=+x inventory/nautobot.yml
+#
+# For the workshop itself, don't rely on this at all — pre-create both AWX
+# Inventories during provisioning and have attendees switch the Job Template's
+# Inventory field, which uses no file detection.
+#
 # HOW TO USE (locally):
 #   export NAUTOBOT_URL="http://localhost:8080"
 #   export NAUTOBOT_TOKEN="<token>"
