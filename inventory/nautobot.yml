@@ -53,21 +53,31 @@ group_by:
 
 # ------------------------------------------------------------------- host vars
 #
-# compose values are Jinja2 EXPRESSIONS, so literal strings need inner quotes.
+# compose values are Jinja2 EXPRESSIONS, not plain values.
+#
+# ONLY put things here that are genuinely DERIVED FROM NAUTOBOT. Connection
+# plumbing (ansible_connection / ansible_network_os / ansible_become) lives in
+# inventory/group_vars/all.yml instead.
+#
+# Learned the hard way: a bare YAML boolean here (`ansible_become: true`) does
+# not template reliably and is silently dropped. The only symptom is
+# "operation requires privilege escalation" from the first module needing enable
+# mode — every other connection var works, so it looks like anything but a
+# compose problem.
 compose:
   # primary_ip4.address is CIDR ("172.20.20.3/24"); Ansible wants the bare
   # address. Plain Jinja split avoids depending on ipaddr/netaddr.
   ansible_host: primary_ip4.address.split('/')[0]
 
-  # Set explicitly rather than derived from platform.network_driver: that field
-  # holds the netutils name ("arista_eos"), not the Ansible module namespace
-  # ("arista.eos.eos"). Nautobot exposes network_driver_mappings.ansible for the
-  # translation, but whether this plugin surfaces it is unverified — so these are
-  # literals until that is confirmed.
-  ansible_network_os: "'arista.eos.eos'"
-  ansible_connection: "'ansible.netcommon.network_cli'"
-  ansible_become: true
-  ansible_become_method: "'enable'"
+# --------------------------------------------------------------- var renaming
+#
+# The plugin exposes a `tags` hostvar, which collides with Ansible's reserved
+# `tags` and produces:
+#   [WARNING]: Found variable using reserved name 'tags'
+# Harmless, but noisy and confusing in a workshop. Rename it out of the way.
+rename_variables:
+  - pattern: "^tags$"
+    repl: "nautobot_tags"
 
 # ---------------------------------------------------------------------- filters
 #
