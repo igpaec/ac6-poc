@@ -1,0 +1,313 @@
+---
+# Create every AWX object the labs need — the counterpart to seed_nautobot.yml.
+#
+# WHAT THIS IS: an ordinary playbook running against localhost, talking to AWX's
+# /api/v2/ through the awx.awx collection. It touches no devices and no Nautobot.
+#
+# HOW TO RUN:
+#   export CONTROLLER_HOST="http://localhost:8013"
+#   export CONTROLLER_USERNAME="admin"
+#   export CONTROLLER_PASSWORD="AnsibleAC6"
+#   export CONTROLLER_VERIFY_SSL=false
+#   ansible-playbook playbooks/seed_awx.yml
+#
+# Those four env vars are read natively by every awx.awx module — the same
+# pattern the Nautobot inventory plugin uses for NAUTOBOT_URL / NAUTOBOT_TOKEN.
+# No credentials in this file, and nothing to pass on the command line.
+#
+# ⚠️ CONTROLLER_HOST is localhost here because this runs on the VM, alongside
+# the `kubectl port-forward`. That is NOT the address AWX jobs use to reach
+# Nautobot — see nautobot_url below.
+#
+# IDEMPOTENT. Safe to re-run, and that is the point: this is the seed of
+# reset.sh (G5). Re-running restores every object to the state a lab expects.
+#
+# ORDER MATTERS, and awx.awx will not sort it out for you:
+#   credential_type -> credentials -> project -> inventories
+#   -> inventory_sources -> job_templates
+#
+# Covers Labs 0-3. Lab 4's workflow and approval node are G1 and are NOT here
+# yet; awx.awx has workflow_job_template and workflow_job_template_node ready
+# for when that lands.
+
+- name: Seed AWX with the workshop objects
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    org: Default
+    project_name: AC6 POC
+    scm_url: https://github.com/igpaec/ac6-poc.git
+    scm_branch: main
+
+    # 🔴 The URL AWX EXECUTION PODS use to reach Nautobot — not the one you use.
+    # AWX runs in Kubernetes; Nautobot is a plain container on the host. This is
+    # the minikube gateway, which is only stable because § 3 of 15-single-stack
+    # pins the subnet with --subnet=192.168.49.0/24. Assert it before trusting it:
+    #   minikube -p awx ssh -- ip route | grep default
+    nautobot_url_from_pods: http://192.168.49.1:8080
+    nautobot_token: "0123456789abcdef0123456789abcdef01234567"
+
+    device_username: admin
+    device_password: admin
+
+  tasks:
+    - name: Fail early if AWX credentials are missing
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'CONTROLLER_HOST') | length > 0
+          - lookup('env', 'CONTROLLER_USERNAME') | length > 0
+          - lookup('env', 'CONTROLLER_PASSWORD') | length > 0
+        fail_msg: >-
+          CONTROLLER_HOST, CONTROLLER_USERNAME and CONTROLLER_PASSWORD must be
+          exported. See the header of this file.
+
+    # ------------------------------------------------- custom credential type
+    # Input configuration = the form fields. Injector = how they reach the job.
+    #
+    # This is what lets inventory/nautobot.yml hardcode neither URL nor token:
+    # the plugin's api_endpoint and token options read NAUTOBOT_URL and
+    # NAUTOBOT_TOKEN from the environment natively, and this injector puts them
+    # there at runtime. Same file therefore works locally and inside AWX.
+    - name: Credential type — Nautobot API
+      awx.awx.credential_type:
+        name: Nautobot API
+        kind: cloud
+        description: >-
+          Injects NAUTOBOT_URL and NAUTOBOT_TOKEN into a job's environment.
+        inputs:
+          fields:
+            - id: nautobot_url
+              type: string
+              label: Nautobot URL
+            - id: nautobot_token
+              type: string
+              label: Nautobot Token
+              secret: true
+          required:
+            - nautobot_url
+            - nautobot_token
+        injectors:
+          env:
+            NAUTOBOT_URL: "{% raw %}{{ nautobot_url }}{% endraw %}"
+            NAUTOBOT_TOKEN: "{% raw %}{{ nautobot_token }}{% endraw %}"
+        state: present
+
+    # {% raw %} above is essential. Those braces are AWX's OWN templating over
+    # the field ids, evaluated by AWX at job launch. Without raw, Ansible would
+    # try to resolve them here and write empty strings into the injector.
+
+    # ------------------------------------------------------------ credentials
+    - name: Credential — Nautobot API
+      awx.awx.credential:
+        name: Nautobot API
+        organization: "{{ org }}"
+        credential_type: Nautobot API
+        inputs:
+          nautobot_url: "{{ nautobot_url_from_pods }}"
+          nautobot_token: "{{ nautobot_token }}"
+        state: present
+
+    - name: Credential — cEOS admin
+      awx.awx.credential:
+        name: cEOS admin
+        organization: "{{ org }}"
+        credential_type: Machine
+        inputs:
+          username: "{{ device_username }}"
+          password: "{{ device_password }}"
+          become_method: enable
+        state: present
+
+    # ---------------------------------------------------------------- project
+    - name: Project — AC6 POC
+      awx.awx.project:
+        name: "{{ project_name }}"
+        organization: "{{ org }}"
+        scm_type: git
+        scm_url: "{{ scm_url }}"
+        scm_branch: "{{ scm_branch }}"
+        scm_update_on_launch: true
+        scm_clean: true
+        wait: true
+        state: present
+
+    # ------------------------------------------------------------ inventories
+    # BOTH are pre-created on purpose. Lab 1's payoff is the attendee changing
+    # the Job Template's Inventory field from one to the other — a plain object
+    # dropdown. They must NOT be asked to pick an inventory *file*: AWX's
+    # could_be_inventory() only offers .ini, executables, or files named exactly
+    # inventory/hosts, so a .yml plugin config may not appear at all.
+    - name: Inventory — Static (Lab 0)
+      awx.awx.inventory:
+        name: Static (Lab 0)
+        organization: "{{ org }}"
+        description: The hand-maintained inventory the cold open throws away.
+        state: present
+
+    - name: Inventory — Nautobot (Lab 1)
+      awx.awx.inventory:
+        name: Nautobot (Lab 1)
+        organization: "{{ org }}"
+        description: Sourced from Nautobot. Same playbook, no static file.
+        state: present
+
+    - name: Inventory source — static.ini
+      awx.awx.inventory_source:
+        name: static.ini
+        inventory: Static (Lab 0)
+        source: scm
+        source_project: "{{ project_name }}"
+        source_path: inventory/static.ini
+        overwrite: true
+        update_on_launch: true
+        state: present
+
+    # The Nautobot credential is attached HERE so the inventory plugin gets
+    # NAUTOBOT_URL / NAUTOBOT_TOKEN during the sync.
+    - name: Inventory source — nautobot.yml
+      awx.awx.inventory_source:
+        name: nautobot.yml
+        inventory: Nautobot (Lab 1)
+        source: scm
+        source_project: "{{ project_name }}"
+        source_path: inventory/nautobot.yml
+        credential: Nautobot API
+        overwrite: true
+        update_on_launch: true
+        state: present
+
+    # --------------------------------------------------------- job templates
+    # Lab 0. The survey is the villain of the cold open: six facts Nautobot
+    # already holds, retyped by a human, with no validation and no history.
+    - name: Job template — Onboard Site (survey)
+      awx.awx.job_template:
+        name: Onboard Site (survey)
+        organization: "{{ org }}"
+        project: "{{ project_name }}"
+        playbook: playbooks/configure_base.yml
+        inventory: Static (Lab 0)
+        credentials:
+          - cEOS admin
+        become_enabled: true
+        ask_inventory_on_launch: true
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: Every field here is a fact Nautobot already knows.
+          spec:
+            - question_name: Site name
+              variable: site_name
+              type: text
+              default: DC1
+              required: true
+            - question_name: Primary NTP server
+              variable: ntp_primary
+              type: text
+              default: 10.0.0.1
+              required: true
+            - question_name: Secondary NTP server
+              variable: ntp_secondary
+              type: text
+              default: 10.0.0.2
+              required: true
+            - question_name: SNMP community
+              variable: snmp_community
+              type: text
+              default: public
+              required: true
+            - question_name: DNS server
+              variable: dns_server
+              type: text
+              default: 10.0.0.53
+              required: true
+            - question_name: Syslog host
+              variable: syslog_host
+              type: text
+              default: 10.0.0.10
+              required: true
+        state: present
+
+    # ask_inventory_on_launch above is what makes Lab 1 a dropdown change rather
+    # than an edit — the attendee switches to "Nautobot (Lab 1)" at launch.
+
+    # Lab 1c. A survey that is NOT a duplicate of the source of truth: it asks
+    # which set to act on, which is a human decision Nautobot cannot make.
+    # Multiple choice rather than text — attendees pick, so there is no typo class.
+    - name: Job template — Configure Dynamic Group members
+      awx.awx.job_template:
+        name: Configure Dynamic Group members
+        organization: "{{ org }}"
+        project: "{{ project_name }}"
+        playbook: playbooks/target_dynamic_group.yml
+        inventory: Nautobot (Lab 1)
+        credentials:
+          - cEOS admin
+          - Nautobot API
+        become_enabled: true
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: Which Nautobot Dynamic Group should this target?
+              variable: dynamic_group_name
+              type: multiplechoice
+              choices:
+                - leaf-devices-dc1
+              default: leaf-devices-dc1
+              required: true
+        state: present
+
+    # Lab 2. Reads Nautobot only — no device credential, so it runs even with
+    # the switches powered off.
+    - name: Job template — Render intent
+      awx.awx.job_template:
+        name: Render intent
+        organization: "{{ org }}"
+        project: "{{ project_name }}"
+        playbook: playbooks/render_intent.yml
+        inventory: Nautobot (Lab 1)
+        credentials:
+          - Nautobot API
+        state: present
+
+    - name: Job template — Diff intent vs device
+      awx.awx.job_template:
+        name: Diff intent vs device
+        organization: "{{ org }}"
+        project: "{{ project_name }}"
+        playbook: playbooks/diff_intent.yml
+        inventory: Nautobot (Lab 1)
+        credentials:
+          - cEOS admin
+          - Nautobot API
+        become_enabled: true
+        state: present
+
+    # Lab 3. ask_variables_on_launch is REQUIRED: the Nautobot Job Button POSTs
+    # extra_vars (device_name, device_id, device_location) and AWX silently
+    # discards them unless the template accepts prompted variables.
+    - name: Job template — Write back to Nautobot
+      awx.awx.job_template:
+        name: Write back to Nautobot
+        organization: "{{ org }}"
+        project: "{{ project_name }}"
+        playbook: playbooks/write_back.yml
+        inventory: Nautobot (Lab 1)
+        credentials:
+          - cEOS admin
+          - Nautobot API
+        become_enabled: true
+        ask_variables_on_launch: true
+        state: present
+
+    # ------------------------------------------------------------ verification
+    - name: Next step
+      ansible.builtin.debug:
+        msg: >-
+          AWX seeded. Sync the project and the Nautobot inventory source, then
+          confirm both hosts appear:
+          Resources -> Inventories -> Nautobot (Lab 1) -> Hosts.
+          Lab 4's workflow and approval node are not created here yet (G1).
