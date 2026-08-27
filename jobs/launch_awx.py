@@ -23,15 +23,29 @@ Verified against Nautobot 3.2.2 source:
   logging is standard `self.logger`
 
 CONFIGURATION (environment variables on the Nautobot worker):
-  AWX_HOST           e.g. http://172.17.0.1:8013   <- NOT localhost, see below
+  AWX_HOST           http://host.docker.internal:8013   <- NOT localhost, see below
   AWX_TOKEN          an AWX OAuth2 token
   AWX_JOB_TEMPLATE   name of the Job Template to launch
 
-⚠️ AWX_HOST must be reachable FROM THE NAUTOBOT CONTAINER. Nautobot runs in
-docker-compose, AWX in minikube behind a port-forward on the host, so
-`localhost:8013` resolves to the Nautobot container itself and will fail. Use the
-Docker bridge gateway (commonly 172.17.0.1) or host.docker.internal. This is the
-same class of problem as AWX reaching Nautobot, just in the opposite direction.
+⚠️ AWX_HOST must be reachable FROM THE CELERY WORKER CONTAINER — this Job runs
+there, not in the web container. Nautobot runs in docker-compose, AWX in minikube
+behind a port-forward on the host, so `localhost:8013` resolves to the worker
+container itself and will fail.
+
+Use `host.docker.internal`, which requires this on BOTH the nautobot and
+celery_worker services in environments/docker-compose.local.yml:
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+Do NOT hardcode a bridge gateway such as 172.17.0.1. That is the docker0 address;
+Nautobot's compose network gets its own, and which /16 it lands on depends on
+Docker network creation order — measured 172.18.0.1 on the validation VM. Since
+this value is stored in the Job Button config on every attendee stack, a per-host
+address breaks Lab 3 on an unpredictable subset.
+
+⚠️ The port-forward must be started with `--address 0.0.0.0`. The default binds
+127.0.0.1 only, which no container can reach.
 
 ⚠️ The target Job Template needs "Prompt on launch" enabled for Variables
 (`ask_variables_on_launch: true`), otherwise AWX silently discards the extra_vars

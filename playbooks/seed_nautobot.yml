@@ -37,12 +37,62 @@
     mgmt_prefix: 172.20.20.0/24
     mgmt_interface: Management0
 
-    # Keep in sync with inventory/static.ini until Lab 1 makes that file obsolete.
+    # These MUST match clab/poc.clab.yml's pinned mgmt-ipv4 values, and the
+    # literals printed in the attendee labs. Lab 1's dynamic inventory builds
+    # ansible_host from primary_ip4, so a mismatch here sends every playbook to
+    # the wrong address — with no error that says so.
+    #
+    # Corrected 2026-08-26: these were .3 and .2, copied from an unpinned
+    # ContainerLab run where the nodes came up in reverse order.
     poc_devices:
       - name: leaf1
-        mgmt_ip: 172.20.20.3/24
+        mgmt_ip: 172.20.20.11/24
       - name: leaf2
-        mgmt_ip: 172.20.20.2/24
+        mgmt_ip: 172.20.20.12/24
+
+    # ---------------------------------------------------------- Lab 2 content
+    # Same keys as inventory/group_vars/leaf.yml, deliberately. Lab 2 deletes
+    # that file and the playbook keeps working because Nautobot serves these
+    # instead — which is the whole point of the lab.
+    leaf_base_context:
+      ntp_servers:
+        - 10.0.0.1
+        - 10.0.0.2
+      dns_servers:
+        - 10.0.0.53
+      snmp_community: public
+      mgmt_vrf: MGMT
+      syslog_host: 10.0.0.10
+
+    # JSON Schema for the above. Lab 2d has the attendee set ntp_servers to a
+    # plain string and watch Nautobot refuse it, so the array constraint is the
+    # part that has to bite.
+    leaf_base_schema:
+      title: leaf-base
+      type: object
+      properties:
+        ntp_servers:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: ipv4
+        dns_servers:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: ipv4
+        snmp_community:
+          type: string
+          minLength: 1
+        mgmt_vrf:
+          type: string
+        syslog_host:
+          type: string
+          format: ipv4
+      required:
+        - ntp_servers
 
   tasks:
     - name: Fail early if credentials are missing
@@ -127,6 +177,9 @@
         u_height: 1
         state: present
 
+    # Registered: the Config Context below scopes itself to this role and needs
+    # its UUID. The module returns the object whether it created it or found it
+    # already there, so this is safe on a re-run.
     - name: Role
       networktocode.nautobot.role:
         <<: *nb
@@ -134,6 +187,7 @@
         content_types:
           - dcim.device
         state: present
+      register: role_leaf
 
     # ----------------------------------------------------------------- devices
     - name: Devices
@@ -215,10 +269,104 @@
       loop_control:
         label: "{{ item.name }}"
 
+    # ------------------------------------------- Dynamic Group (Lab 1c)
+    # Nautobot 3.x requires group_type. `dynamic-filter` is the one whose
+    # membership is computed from `filter` — the other two are `static` and
+    # `dynamic-set`, neither of which is what Lab 1c demonstrates.
+    #
+    # Note the filter values are LISTS. Nautobot's filter syntax mirrors the
+    # REST API's query parameters, where every value is multi-valued.
+    - name: Dynamic Group — leaf devices at DC1
+      networktocode.nautobot.dynamic_group:
+        <<: *nb
+        name: leaf-devices-dc1
+        group_type: dynamic-filter
+        content_type: dcim.device
+        description: >-
+          Lab 1c targets this group by name. Membership is a live query, not a
+          list — add a device matching the filter and it appears here.
+        filter:
+          role:
+            - leaf
+          location:
+            - "{{ site_name }}"
+        state: present
+
+    # ------------------------------------------- Config Context (Lab 2)
+    # No collection module exists for Config Contexts or their Schemas in
+    # networktocode.nautobot 6.2.0 — only `dynamic_group`. So these two go
+    # through the REST API directly.
+    #
+    # Field names verified against Nautobot 3.2.3's models:
+    #   ConfigContextSchema: name, description, data_schema
+    #   ConfigContext:       name, weight, description, is_active, data,
+    #                        config_context_schema, and M2M scopes including
+    #                        `roles` (extras.Role, not a dcim device role)
+    #
+    # Both are idempotent by name: query first, then POST or PATCH.
+    - name: Look up the Config Context Schema
+      ansible.builtin.uri:
+        url: "{{ nb.url }}/api/extras/config-context-schemas/?name=leaf-base-schema"
+        method: GET
+        headers: &nb_headers
+          Authorization: "Token {{ nb.token }}"
+          Accept: application/json
+        status_code: 200
+      register: schema_lookup
+
+    - name: Config Context Schema — leaf-base-schema
+      ansible.builtin.uri:
+        url: >-
+          {{ nb.url }}/api/extras/config-context-schemas/{{
+          (schema_lookup.json.results | first).id ~ '/' if schema_lookup.json.count > 0 else '' }}
+        method: "{{ 'PATCH' if schema_lookup.json.count > 0 else 'POST' }}"
+        headers: *nb_headers
+        body_format: json
+        body:
+          name: leaf-base-schema
+          description: >-
+            Validates leaf-base. Lab 2d proves this rejects a bad ntp_servers
+            before it can reach a device.
+          data_schema: "{{ leaf_base_schema }}"
+        status_code: [200, 201]
+      register: schema_result
+
+    - name: Look up the Config Context
+      ansible.builtin.uri:
+        url: "{{ nb.url }}/api/extras/config-contexts/?name=leaf-base"
+        method: GET
+        headers: *nb_headers
+        status_code: 200
+      register: context_lookup
+
+    - name: Config Context — leaf-base
+      ansible.builtin.uri:
+        url: >-
+          {{ nb.url }}/api/extras/config-contexts/{{
+          (context_lookup.json.results | first).id ~ '/' if context_lookup.json.count > 0 else '' }}
+        method: "{{ 'PATCH' if context_lookup.json.count > 0 else 'POST' }}"
+        headers: *nb_headers
+        body_format: json
+        body:
+          name: leaf-base
+          weight: 1000
+          is_active: true
+          description: >-
+            Serves the variables that inventory/group_vars/leaf.yml used to
+            hold. Scoped to the role, not to devices — any new leaf inherits it.
+          config_context_schema: "{{ schema_result.json.id }}"
+          # Scope. This is what makes Lab 2's point: attached to a rule, not a device.
+          roles:
+            - "{{ role_leaf.role.id }}"
+          data: "{{ leaf_base_context }}"
+        status_code: [200, 201]
+
     # ------------------------------------------------------------ verification
     - name: Next step
       ansible.builtin.debug:
         msg: >-
-          Seeded {{ poc_devices | length }} devices at {{ site_name }}.
-          Check the Nautobot UI (Devices), then move to Stage 1b:
+          Seeded {{ poc_devices | length }} devices at {{ site_name }},
+          plus Config Context leaf-base (schema-validated) and Dynamic Group
+          leaf-devices-dc1. Verify:
           ansible-inventory -i inventory/nautobot.yml --graph
+          then: ansible-inventory -i inventory/nautobot.yml --host leaf1 | jq '.ntp_servers'
