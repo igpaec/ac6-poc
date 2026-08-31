@@ -181,6 +181,19 @@
     # --------------------------------------------------------- job templates
     # Lab 0. The survey is the villain of the cold open: six facts Nautobot
     # already holds, retyped by a human, with no validation and no history.
+    #
+    # 🟠 F14 — THE `default:` VALUES BELOW SHOULD BE REMOVED.
+    #
+    # They let an attendee click Launch without typing anything, which deletes
+    # the entire point of the cold open. The lab is meant to make retyping six
+    # known-good facts feel tedious, and to leave room for a typo that nothing
+    # catches — that unvalidated typo is what Lab 2's Config Context Schema
+    # later prevents. A pre-filled form makes the "before" state look fine.
+    #
+    # The values stay printed in attendee/lab0-cold-open.md so nobody has to
+    # hunt for them. They just should not arrive already entered.
+    #
+    # Do not "helpfully" re-add these.
     - name: Job template — Onboard Site (survey)
       awx.awx.job_template:
         name: Onboard Site (survey)
