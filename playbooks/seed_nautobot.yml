@@ -437,14 +437,46 @@
         status_code: [200, 201]
       register: repo_result
 
-    # Sync is a POST to the repository's /sync/ action. It enqueues a background
-    # job, so the Jobs below do not exist the instant this returns.
+    # Sync is a POST to /sync/. It ENQUEUES a Celery task and returns 200
+    # immediately, so a success here means "accepted", not "worked".
     - name: Sync the Git Repository
       ansible.builtin.uri:
         url: "{{ nb.url }}/api/extras/git-repositories/{{ repo_result.json.id }}/sync/"
         method: POST
         headers: *nb_headers
         status_code: [200, 201, 202]
+      register: sync_request
+
+    # Follow the JobResult rather than polling for the Job to appear.
+    #
+    # An earlier version skipped straight to "wait for the Job", which failed
+    # after 12 silent retries and said nothing about WHY — the sync could have
+    # failed to clone, hit an import error, or never run at all because the
+    # celery worker was down. Watching the JobResult turns all of those into a
+    # message.
+    - name: Wait for the sync to finish
+      ansible.builtin.uri:
+        url: "{{ nb.url }}/api/extras/job-results/{{ sync_request.json.job_result.id }}/"
+        method: GET
+        headers: *nb_headers
+        status_code: 200
+      register: sync_result
+      until: (sync_result.json.status.value | default(sync_result.json.status)) in ['SUCCESS', 'FAILURE', 'REVOKED']
+      retries: 24
+      delay: 5
+
+    # 🔴 Stuck on PENDING means the celery worker is not consuming the queue.
+    # Nothing is wrong with the repository — check `docker ps` for
+    # nautobot_docker_compose-celery_worker-1.
+    - name: Report the sync outcome
+      ansible.builtin.assert:
+        that:
+          - (sync_result.json.status.value | default(sync_result.json.status)) == 'SUCCESS'
+        fail_msg: >-
+          Git repository sync did not succeed — status
+          {{ sync_result.json.status.value | default(sync_result.json.status) }}.
+          Read the log at {{ nb.url }}/extras/job-results/{{ sync_request.json.job_result.id }}/
+          If it never left PENDING, the celery worker is not running.
 
     - name: Wait for the Job to be imported
       ansible.builtin.uri:
@@ -454,8 +486,21 @@
         status_code: 200
       register: job_lookup
       until: job_lookup.json.count > 0
-      retries: 12
+      retries: 6
       delay: 5
+
+    # If the sync succeeded but no Job appeared, the repository was fetched and
+    # `jobs/` either is not at its root or failed to import. Check the same
+    # JobResult log — the importer records the exception there.
+    - name: Explain a successful sync that imported no Job
+      ansible.builtin.assert:
+        that:
+          - job_lookup.json.count > 0
+        fail_msg: >-
+          Sync succeeded but no Job named "Launch AWX job for this device"
+          exists. Either jobs/ is missing from the pushed repository, or the
+          module raised on import. The traceback is in the sync log:
+          {{ nb.url }}/extras/job-results/{{ sync_request.json.job_result.id }}/
 
     # 🔴 Jobs import DISABLED. Nautobot will not run one until this is flipped,
     # and the failure is silent from the button's point of view.
