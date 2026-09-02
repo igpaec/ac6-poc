@@ -568,70 +568,6 @@
         state: present
       register: awx_token
 
-    # 🔴 IT MUST GO IN creds.env — NOT A NEW FILE.
-    #
-    # An earlier revision wrote environments/awx.env and told the operator to
-    # wire it into docker-compose.local.yml by hand. That manual step is easy to
-    # skip, and skipping it fails LATE and CONFUSINGLY: provisioning is green,
-    # the Job Button renders, and only on click does the Job Result say
-    # "AWX_HOST and AWX_TOKEN must be set on the Nautobot worker."
-    #
-    # nautobot-docker-compose loads exactly two env files, in
-    # environments/docker-compose.base.yml:
-    #
-    #     x-nautobot-base: &nautobot-base
-    #       env_file:
-    #         - "local.env"
-    #         - "creds.env"
-    #
-    # and `nautobot`, `celery_worker` and `celery_beat` all merge that anchor.
-    # So anything written to creds.env reaches the worker with no compose edit.
-    # creds.env over local.env because AWX_TOKEN is a live credential.
-    #
-    # blockinfile (not copy/lineinfile) so re-running replaces the block in
-    # place rather than appending a second copy — this playbook mints a new
-    # token every run, and stale AWX_TOKEN lines would shadow unpredictably.
-    - name: Put the AWX connection details where the celery worker will see them
-      ansible.builtin.blockinfile:
-        path: "{{ lookup('env', 'HOME') }}/nautobot-docker-compose/environments/creds.env"
-        marker: "# {mark} ANSIBLE MANAGED BLOCK — ac6 workshop AWX access"
-        create: true
-        mode: "0600"
-        block: |
-          AWX_HOST=http://host.docker.internal:8013
-          AWX_TOKEN={{ awx_token.ansible_facts.controller_token.token }}
-          AWX_JOB_TEMPLATE=Write back to Nautobot
-      register: awx_env
-
-    # `docker compose restart` is NOT enough — it reuses the existing container,
-    # which keeps the environment it was created with. The containers have to be
-    # recreated, which is what `invoke start` (docker compose up -d) does once
-    # the env file has changed.
-    #
-    # Full path to invoke: this playbook may run from a shell whose PATH does
-    # not include the /opt/ansible venv.
-    - name: Recreate the Nautobot containers so they pick up the new environment
-      ansible.builtin.shell: /opt/ansible/bin/invoke stop && /opt/ansible/bin/invoke start
-      args:
-        chdir: "{{ lookup('env', 'HOME') }}/nautobot-docker-compose"
-      when: awx_env is changed
-      changed_when: true
-
-    # Verify on the WORKER, not the web container. The Job Button runs its
-    # receive_job_button() in celery, so the web container having the variable
-    # proves nothing — and the earlier failure looked exactly like that.
-    #
-    # Container name is {project}-{service}-1; nautobot-docker-compose pins the
-    # project to "nautobot_docker_compose" in tasks.py, so this is stable.
-    - name: Confirm the celery worker can actually see AWX_HOST
-      ansible.builtin.command: docker exec nautobot_docker_compose-celery_worker-1 printenv AWX_HOST
-      register: worker_env
-      changed_when: false
-      failed_when: "'host.docker.internal' not in (worker_env.stdout | default(''))"
-      retries: 12
-      delay: 10
-      until: worker_env is succeeded
-
     # -------------------------------------------- Lab 4: the Nautobot webhook
     # 🔴 THIS IS A NAUTOBOT OBJECT CREATED BY THE AWX SEED, AND THAT IS ON
     # PURPOSE. It needs two things that only exist once AWX has been seeded:
@@ -642,6 +578,19 @@
     # the collection's module list), so this is the REST API — the same
     # look-then-POST-or-PATCH shape used for Config Contexts and the Git
     # Repository in seed_nautobot.yml.
+    #
+    # ⚠️ ORDER: THIS BLOCK RUNS *BEFORE* THE CONTAINER RESTART BELOW.
+    #
+    # An earlier revision put it after, and it failed on the first Lab 4 run
+    # with `Connection reset by peer` against localhost:8080. The restart task
+    # had returned, but `invoke start` only waits for containers to be created —
+    # Django takes another 30-60s to start serving, and in between the port is
+    # bound by the docker proxy and nothing answers it. The worker env check is
+    # no guard: it is a `docker exec`, which succeeds long before HTTP does.
+    #
+    # Nothing here needs the restart. The token and the workflow id are both in
+    # memory already, and Nautobot is still up and serving at this point. So the
+    # fix is ordering, not waiting.
     - name: Look for an existing device-status webhook
       ansible.builtin.uri:
         url: "{{ nautobot_url_local }}/api/extras/webhooks/?name=device-status-change"
@@ -652,6 +601,11 @@
           Content-Type: application/json
         status_code: 200
       register: webhook_lookup
+      # Cheap insurance for the general case — Nautobot mid-restart from some
+      # earlier step, or still migrating. Not a substitute for the ordering above.
+      retries: 12
+      delay: 10
+      until: webhook_lookup is succeeded
 
     # ⚠️ `{% raw %}` IS LOAD-BEARING — the same trap as the credential injector
     # above. body_template is a Jinja2 template that NAUTOBOT renders, at
@@ -721,6 +675,71 @@
         body: "{{ webhook_body }}"
         status_code: 200
       when: (webhook_lookup.json.results | default([])) | length == 1
+
+
+    # 🔴 IT MUST GO IN creds.env — NOT A NEW FILE.
+    #
+    # An earlier revision wrote environments/awx.env and told the operator to
+    # wire it into docker-compose.local.yml by hand. That manual step is easy to
+    # skip, and skipping it fails LATE and CONFUSINGLY: provisioning is green,
+    # the Job Button renders, and only on click does the Job Result say
+    # "AWX_HOST and AWX_TOKEN must be set on the Nautobot worker."
+    #
+    # nautobot-docker-compose loads exactly two env files, in
+    # environments/docker-compose.base.yml:
+    #
+    #     x-nautobot-base: &nautobot-base
+    #       env_file:
+    #         - "local.env"
+    #         - "creds.env"
+    #
+    # and `nautobot`, `celery_worker` and `celery_beat` all merge that anchor.
+    # So anything written to creds.env reaches the worker with no compose edit.
+    # creds.env over local.env because AWX_TOKEN is a live credential.
+    #
+    # blockinfile (not copy/lineinfile) so re-running replaces the block in
+    # place rather than appending a second copy — this playbook mints a new
+    # token every run, and stale AWX_TOKEN lines would shadow unpredictably.
+    - name: Put the AWX connection details where the celery worker will see them
+      ansible.builtin.blockinfile:
+        path: "{{ lookup('env', 'HOME') }}/nautobot-docker-compose/environments/creds.env"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK — ac6 workshop AWX access"
+        create: true
+        mode: "0600"
+        block: |
+          AWX_HOST=http://host.docker.internal:8013
+          AWX_TOKEN={{ awx_token.ansible_facts.controller_token.token }}
+          AWX_JOB_TEMPLATE=Write back to Nautobot
+      register: awx_env
+
+    # `docker compose restart` is NOT enough — it reuses the existing container,
+    # which keeps the environment it was created with. The containers have to be
+    # recreated, which is what `invoke start` (docker compose up -d) does once
+    # the env file has changed.
+    #
+    # Full path to invoke: this playbook may run from a shell whose PATH does
+    # not include the /opt/ansible venv.
+    - name: Recreate the Nautobot containers so they pick up the new environment
+      ansible.builtin.shell: /opt/ansible/bin/invoke stop && /opt/ansible/bin/invoke start
+      args:
+        chdir: "{{ lookup('env', 'HOME') }}/nautobot-docker-compose"
+      when: awx_env is changed
+      changed_when: true
+
+    # Verify on the WORKER, not the web container. The Job Button runs its
+    # receive_job_button() in celery, so the web container having the variable
+    # proves nothing — and the earlier failure looked exactly like that.
+    #
+    # Container name is {project}-{service}-1; nautobot-docker-compose pins the
+    # project to "nautobot_docker_compose" in tasks.py, so this is stable.
+    - name: Confirm the celery worker can actually see AWX_HOST
+      ansible.builtin.command: docker exec nautobot_docker_compose-celery_worker-1 printenv AWX_HOST
+      register: worker_env
+      changed_when: false
+      failed_when: "'host.docker.internal' not in (worker_env.stdout | default(''))"
+      retries: 12
+      delay: 10
+      until: worker_env is succeeded
 
     # ------------------------------------------------------------ verification
     - name: Next step
