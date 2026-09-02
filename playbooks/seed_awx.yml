@@ -198,6 +198,37 @@
         wait: true
         state: present
 
+    # 🔴 SYNC BEFORE CREATING JOB TEMPLATES. This is not belt-and-braces.
+    #
+    # `awx.awx.job_template` validates `playbook` against AWX's cached list of
+    # files from the project's LAST SUCCESSFUL SYNC, and refuses with:
+    #
+    #     Unable to create job_template <name>: {'playbook': ['Playbook not found for project.']}
+    #
+    # `wait: true` on the project task above only waits for the sync that
+    # happens when the project is CREATED. On every later run the project is
+    # unchanged, so no sync is triggered and AWX's file list is whatever it was
+    # — which means any playbook added to the repo since then does not exist as
+    # far as job_template validation is concerned.
+    #
+    # Hit 2026-09-02 adding Lab 4: turnup_diff.yml was pushed and pulled, the
+    # playbook was visibly present in the repo on the VM, and AWX still said it
+    # was not there. AWX was right — it had never looked.
+    #
+    # `scm_update_on_launch: true` does not help either: that syncs when a JOB
+    # launches, and this failure happens at TEMPLATE CREATION time, before any
+    # job exists.
+    #
+    # `wait: true` here so the sync has finished before the next task runs; the
+    # module reports not-changed when the SCM revision is unmoved, so this is
+    # cheap on a re-run.
+    - name: Sync the project so AWX can see any newly added playbooks
+      awx.awx.project_update:
+        project: "{{ project_name }}"
+        organization: "{{ org }}"
+        wait: true
+        timeout: 300
+
     # ------------------------------------------------------------ inventories
     # BOTH are pre-created on purpose. Lab 1's payoff is the attendee changing
     # the Job Template's Inventory field from one to the other — a plain object
