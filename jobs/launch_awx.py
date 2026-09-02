@@ -27,6 +27,15 @@ CONFIGURATION (environment variables on the Nautobot worker):
   AWX_TOKEN          an AWX OAuth2 token
   AWX_JOB_TEMPLATE   name of the Job Template to launch
 
+All three are written by playbooks/seed_awx.yml into
+environments/creds.env, which is one of the two files
+(local.env, creds.env) that nautobot-docker-compose's `x-nautobot-base` anchor
+loads into nautobot, celery_worker and celery_beat. Do not invent a third env
+file — nothing reads it, and the failure surfaces only when a Job Button is
+clicked. Changing the file requires the containers to be RECREATED
+(`invoke stop && invoke start`); `invoke restart` is docker compose restart,
+which reuses the container and its original environment.
+
 ⚠️ AWX_HOST must be reachable FROM THE CELERY WORKER CONTAINER — this Job runs
 there, not in the web container. Nautobot runs in docker-compose, AWX in minikube
 behind a port-forward on the host, so `localhost:8013` resolves to the worker
