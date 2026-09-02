@@ -690,6 +690,28 @@
     # that passes through a variable. The injector above is the first case; this
     # is the second.
     #
+    # 🔴 `status_changed` BREAKS A FEEDBACK LOOP. Do not remove it.
+    #
+    # Observed 2026-09-02: approving the workflow ran node 3, node 3 ran
+    # write_back.yml, write_back.yml UPDATED THE DEVICE — and a device update is
+    # exactly what this webhook fires on. So a second workflow launched, asked
+    # for approval, wrote back again, and launched a third. Approve once and it
+    # never stops.
+    #
+    #   status -> Active --> webhook --> workflow --> approve --> write_back
+    #                 ^                                               |
+    #                 +-------------- device updated -----------------+
+    #
+    # Nautobot has no webhook condition field, so the webhook cannot be told to
+    # care only about status. But the payload knows which fields moved:
+    # `snapshots.differences.added` is keyed by the field names that actually
+    # changed in this event (verified in nautobot/extras/models/change_logging.py,
+    # get_snapshots). The write-back touches serial, software_version and two
+    # custom fields — never status.
+    #
+    # turnup_diff.yml stops the workflow when this is false, so the loop ends
+    # one short, device-free run after the real one.
+    #
     # `limit` targets the workflow at the one device that changed. Both the
     # workflow and its two job templates set ask_limit_on_launch, without which
     # AWX accepts the field and ignores it.
@@ -721,7 +743,8 @@
                 "nautobot_event": "{{ event }}",
                 "nautobot_timestamp": "{{ timestamp }}",
                 "nautobot_request_id": "{{ request_id }}",
-                "changed_by": "{{ username }}"
+                "changed_by": "{{ username }}",
+                "status_changed": "{{ 'status' in ((snapshots or {}).get('differences') or {}).get('added', {}) }}"
               },
               "limit": "{{ data.name }}"
             }

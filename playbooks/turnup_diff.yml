@@ -102,6 +102,37 @@
               Expected exactly one device named '{{ device_name }}' in Nautobot,
               found {{ (device_lookup.json.results | default([])) | length }}.
 
+        # 🔴 LOOP BREAKER. Stop before anything else if this event was not a
+        # status change.
+        #
+        # Node 3 runs write_back.yml, which updates the device in Nautobot —
+        # and a device update fires the very webhook that started this
+        # workflow. Observed 2026-09-02: approve once and it never stops.
+        # Approve, apply, write back, new workflow, approve, apply, write back.
+        #
+        # Nautobot webhooks have no condition field, so this has to be decided
+        # here. The webhook passes `status_changed`, derived from
+        # `snapshots.differences.added`, which lists the fields that actually
+        # moved in this event. The write-back touches serial, software_version
+        # and two custom fields — never status — so the second workflow stops
+        # at this task, in seconds, without touching a device.
+        #
+        # `default('true')` so a manual launch with `-e device_name=...` still
+        # works: absent means "a human asked for this on purpose".
+        - name: Stop unless the status is what changed
+          ansible.builtin.assert:
+            that: status_changed | default('true') | bool
+            fail_msg: >-
+              This event changed {{ device_name }} but not its status, so it is
+              not a site turn-up and the workflow stops here. **This is the
+              expected result after a write-back** — node 3 updates the device,
+              which fires the same webhook again. Stopping here is what stops
+              that becoming a loop. Nothing was changed and nobody was asked to
+              approve anything.
+            success_msg: >-
+              The status changed in this event — this is a real trigger, not
+              an echo of our own write-back.
+
         - name: Report the trigger
           ansible.builtin.debug:
             msg:
