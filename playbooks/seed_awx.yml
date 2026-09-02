@@ -83,6 +83,18 @@
     nautobot_url_from_pods: http://192.168.49.1:8080
     nautobot_token: "0123456789abcdef0123456789abcdef01234567"
 
+    # Nautobot as seen from THIS playbook, running on the VM. Different from
+    # nautobot_url_from_pods above, and different again from the address AWX
+    # has in Nautobot's webhook (host.docker.internal). Three names for one
+    # service, and which one is correct depends entirely on who is asking.
+    nautobot_url_local: "{{ lookup('env', 'NAUTOBOT_URL') | default('http://localhost:8080', true) }}"
+
+    # 🔴 The address NAUTOBOT'S CELERY WORKER uses to reach AWX — the same one
+    # Lab 3's Job Button uses, and for the same reason. Never a bridge-gateway
+    # literal: those depend on Docker network creation order and would differ
+    # between stacks. See troubleshooting.md § 8.
+    awx_url_from_nautobot: http://host.docker.internal:8013
+
     device_username: admin
     device_password: admin
 
@@ -369,6 +381,132 @@
         ask_variables_on_launch: true
         state: present
 
+    # ------------------------------------------------- Lab 4: the gated workflow
+    # Two job templates and a three-node workflow. The workflow is what the
+    # Nautobot webhook launches.
+    #
+    # ask_variables_on_launch AND ask_limit_on_launch are required on BOTH job
+    # templates and on the workflow. AWX drops prompted values at every level
+    # that has not opted in, silently — so a workflow that accepts a limit but
+    # whose nodes do not will run against the whole inventory and report
+    # success. Both flags, everywhere, or the behaviour is wrong rather than
+    # broken.
+    - name: Job template — Site Turnup check and diff
+      awx.awx.job_template:
+        name: Site Turnup - check and diff
+        description: >-
+          Lab 4 node 1. Re-reads the device's status from Nautobot, stops if it
+          is not Active, then renders intent and diffs it in check mode. Runs
+          BEFORE the approval node so the approver has a diff to read.
+        organization: "{{ org }}"
+        project: "{{ project_name }}"
+        playbook: playbooks/turnup_diff.yml
+        inventory: Nautobot (Lab 1)
+        credentials:
+          - cEOS admin
+          - Nautobot API
+        become_enabled: true
+        ask_variables_on_launch: true
+        ask_limit_on_launch: true
+        state: present
+
+    # 🔴 apply: true lives HERE, not in the playbook. turnup_apply.yml imports
+    # the same diff_intent.yml that node 1 runs, which defaults to check mode.
+    # Job template extra_vars override play vars, so this one flag is the entire
+    # difference between "show me" and "do it" — and it guarantees the approver
+    # saw the change that gets made, because it is literally the same code path.
+    - name: Job template — Site Turnup apply and write back
+      awx.awx.job_template:
+        name: Site Turnup - apply and write back
+        description: >-
+          Lab 4 node 3. Applies the configuration the approver saw, then writes
+          discovered state back to Nautobot. Only runs if the approval node was
+          approved.
+        organization: "{{ org }}"
+        project: "{{ project_name }}"
+        playbook: playbooks/turnup_apply.yml
+        inventory: Nautobot (Lab 1)
+        credentials:
+          - cEOS admin
+          - Nautobot API
+        become_enabled: true
+        extra_vars:
+          apply: true
+        ask_variables_on_launch: true
+        ask_limit_on_launch: true
+        state: present
+
+    - name: Workflow — Site Turnup (gated)
+      awx.awx.workflow_job_template:
+        name: Site Turnup (gated)
+        description: >-
+          Lab 4. Launched by the Nautobot webhook when a device is updated.
+          Checks the trigger, diffs, waits for a human, then applies.
+        organization: "{{ org }}"
+        inventory: Nautobot (Lab 1)
+        ask_variables_on_launch: true
+        ask_limit_on_launch: true
+        state: present
+      register: wfjt
+
+    # ⚠️ NODES FIRST, LINKS SECOND — two passes, not one.
+    # A node cannot reference a sibling that does not exist yet, so success_nodes
+    # is set in a second pass once all three identifiers are known. This is the
+    # pattern in the collection's own documentation for approval workflows.
+    - name: Workflow node 1 — check and diff
+      awx.awx.workflow_job_template_node:
+        identifier: turnup-check
+        workflow_job_template: Site Turnup (gated)
+        organization: "{{ org }}"
+        unified_job_template: Site Turnup - check and diff
+        state: present
+
+    # The only node that runs no code. `timeout: 0` means it waits indefinitely
+    # — deliberate for a lab, where an attendee may take a while to get here.
+    # Lab 4's stretch goal asks them to set a real timeout and watch it expire.
+    - name: Workflow node 2 — the approval gate
+      awx.awx.workflow_job_template_node:
+        identifier: turnup-approval
+        workflow_job_template: Site Turnup (gated)
+        organization: "{{ org }}"
+        approval_node:
+          name: Approve site turn-up
+          description: >-
+            Read node 1's diff before approving. Approving applies that
+            configuration to the device and writes state back to Nautobot.
+          timeout: 0
+        state: present
+
+    - name: Workflow node 3 — apply and write back
+      awx.awx.workflow_job_template_node:
+        identifier: turnup-apply
+        workflow_job_template: Site Turnup (gated)
+        organization: "{{ org }}"
+        unified_job_template: Site Turnup - apply and write back
+        state: present
+
+    # success_nodes, not always_nodes. If node 1 decides this was not a turn-up,
+    # or the diff fails, nobody is asked to approve anything.
+    - name: Link check → approval
+      awx.awx.workflow_job_template_node:
+        identifier: turnup-check
+        workflow_job_template: Site Turnup (gated)
+        organization: "{{ org }}"
+        success_nodes:
+          - turnup-approval
+        state: present
+
+    # An approval node "succeeds" when approved and "fails" when denied or timed
+    # out, so success_nodes here is exactly "only if a human said yes".
+    - name: Link approval → apply
+      awx.awx.workflow_job_template_node:
+        identifier: turnup-approval
+        workflow_job_template: Site Turnup (gated)
+        organization: "{{ org }}"
+        success_nodes:
+          - turnup-apply
+        state: present
+
     # --------------------------------------------- OAuth2 token (Labs 3 and 4)
     # 🔴 THE ONE CREDENTIAL THAT CANNOT BE PINNED. Everything else in this
     # workshop is declarative — both admin passwords and the Nautobot API token
@@ -463,11 +601,103 @@
       delay: 10
       until: worker_env is succeeded
 
+    # -------------------------------------------- Lab 4: the Nautobot webhook
+    # 🔴 THIS IS A NAUTOBOT OBJECT CREATED BY THE AWX SEED, AND THAT IS ON
+    # PURPOSE. It needs two things that only exist once AWX has been seeded:
+    # the workflow's numeric id, and the OAuth2 token to authenticate with.
+    # Putting it in seed_nautobot.yml would mean running that playbook twice.
+    #
+    # There is no `webhook` module in networktocode.nautobot (checked against
+    # the collection's module list), so this is the REST API — the same
+    # look-then-POST-or-PATCH shape used for Config Contexts and the Git
+    # Repository in seed_nautobot.yml.
+    - name: Look for an existing device-status webhook
+      ansible.builtin.uri:
+        url: "{{ nautobot_url_local }}/api/extras/webhooks/?name=device-status-change"
+        method: GET
+        headers: &nb_hdrs
+          Authorization: "Token {{ nautobot_token }}"
+          Accept: application/json
+          Content-Type: application/json
+        status_code: 200
+      register: webhook_lookup
+
+    # ⚠️ `{% raw %}` IS LOAD-BEARING — the same trap as the credential injector
+    # above. body_template is a Jinja2 template that NAUTOBOT renders, at
+    # webhook-send time, against its own context. Without the raw block Ansible
+    # would render `{{ data.name }}` here and store an empty string, and the
+    # webhook would POST a body with no device name in it. Nothing would error.
+    #
+    # Nautobot's context is: event, timestamp, model, username, request_id,
+    # data, snapshots (verified in nautobot/extras/tasks.py, process_webhook).
+    #
+    # `limit` targets the workflow at the one device that changed. Both the
+    # workflow and its two job templates set ask_limit_on_launch, without which
+    # AWX accepts the field and ignores it.
+    #
+    # We deliberately do NOT send the status. `data` is object_data_v2, in which
+    # related objects carry only id/object_type/url — no name — so the status
+    # would render empty. turnup_diff.yml re-reads it from Nautobot instead,
+    # which is both more reliable and the more honest lesson.
+    - name: Build the webhook definition
+      ansible.builtin.set_fact:
+        webhook_body:
+          name: device-status-change
+          content_types:
+            - dcim.device
+          type_create: false
+          type_update: true
+          type_delete: false
+          enabled: true
+          payload_url: "{{ awx_url_from_nautobot }}/api/v2/workflow_job_templates/{{ wfjt.id }}/launch/"
+          http_method: POST
+          http_content_type: application/json
+          additional_headers: "Authorization: Bearer {{ awx_token.ansible_facts.controller_token.token }}"
+          ssl_verification: false
+          body_template: |
+            {% raw %}{
+              "extra_vars": {
+                "device_name": "{{ data.name }}",
+                "device_id": "{{ data.id }}",
+                "nautobot_event": "{{ event }}",
+                "nautobot_timestamp": "{{ timestamp }}",
+                "nautobot_request_id": "{{ request_id }}",
+                "changed_by": "{{ username }}"
+              },
+              "limit": "{{ data.name }}"
+            }{% endraw %}
+
+    - name: Create the webhook
+      ansible.builtin.uri:
+        url: "{{ nautobot_url_local }}/api/extras/webhooks/"
+        method: POST
+        headers: *nb_hdrs
+        body_format: json
+        body: "{{ webhook_body }}"
+        status_code: 201
+      when: (webhook_lookup.json.results | default([])) | length == 0
+
+    # PATCH rather than skip: the token is new on every run, so an existing
+    # webhook is carrying a stale Authorization header and would get a 401 from
+    # AWX. That failure is invisible from Nautobot — the change log records the
+    # device edit and nothing says the webhook was rejected.
+    - name: Update the existing webhook with the current token and workflow id
+      ansible.builtin.uri:
+        url: "{{ nautobot_url_local }}/api/extras/webhooks/{{ (webhook_lookup.json.results | first).id }}/"
+        method: PATCH
+        headers: *nb_hdrs
+        body_format: json
+        body: "{{ webhook_body }}"
+        status_code: 200
+      when: (webhook_lookup.json.results | default([])) | length == 1
+
     # ------------------------------------------------------------ verification
     - name: Next step
       ansible.builtin.debug:
-        msg: >-
-          AWX seeded. Sync the project and the Nautobot inventory source, then
-          confirm both hosts appear:
-          Resources -> Inventories -> Nautobot (Lab 1) -> Hosts.
-          Lab 4's workflow and approval node are not created here yet (G1).
+        msg:
+          - "AWX seeded, including Lab 4's workflow and the Nautobot webhook."
+          - "Sync the project and the Nautobot inventory source, then confirm both hosts appear:"
+          - "  Resources -> Inventories -> Nautobot (Lab 1) -> Hosts"
+          - "Lab 4 end to end: set a device's status to Active in Nautobot and watch"
+          - "  Site Turnup (gated) start on its own under AWX -> Jobs."
+          - "Webhook target: {{ awx_url_from_nautobot }}/api/v2/workflow_job_templates/{{ wfjt.id }}/launch/"
