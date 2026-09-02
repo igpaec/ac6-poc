@@ -75,6 +75,12 @@
     scm_url: https://github.com/igpaec/ac6-poc.git
     scm_branch: main
 
+    # Built from ee/execution-environment.yml and loaded into minikube with
+    # `minikube -p awx image load`. No registry involved, so the tag must match
+    # what was loaded exactly — see 15-single-stack.md § 2b.
+    ee_name: ac6-ee
+    ee_image: "ac6-ee:1.0.0"
+
     # 🔴 The URL AWX EXECUTION PODS use to reach Nautobot — not the one you use.
     # AWX runs in Kubernetes; Nautobot is a plain container on the host. This is
     # the minikube gateway, which is only stable because § 3 of 15-single-stack
@@ -185,7 +191,51 @@
           become_method: enable
         state: present
 
+    # ----------------------------------------------- execution environment
+    # 🔴 THE STOCK EE CANNOT RUN THIS WORKSHOP. Measured 2026-09-02:
+    # quay.io/ansible/awx-ee:24.6.1 ships ansible-core 2.15.12, but
+    # networktocode.nautobot needs >= 2.17.0 and arista.eos needs >= 2.16.0,
+    # and neither pynautobot nor paramiko is present. See ee/execution-environment.yml.
+    #
+    # ⚠️ `pull: missing` IS REQUIRED for a locally built image. The default is
+    # already `missing`, but stating it here is deliberate: `always` would make
+    # AWX try to fetch ac6-ee from a registry that has never heard of it, and
+    # the failure is an image-pull error that says nothing about why.
+    # AWX will happily register an EE whose image does not exist. The failure
+    # then surfaces much later, as ImagePullBackOff on the first job, which
+    # reads like a network problem rather than a missing build step.
+    - name: Check the custom EE image is loaded into minikube
+      ansible.builtin.command: minikube -p awx image ls
+      register: mk_images
+      changed_when: false
+      failed_when: false
+
+    - name: Explain it if the EE image was never built or loaded
+      ansible.builtin.assert:
+        that: ee_image in (mk_images.stdout | default(''))
+        fail_msg: >-
+          {{ ee_image }} is not loaded into the awx minikube profile, so every
+          job would fail with ImagePullBackOff. Build and load it:
+          `/opt/ansible/bin/pip install ansible-builder==3.1.1` then
+          `cd ~/ac6-poc/ee && /opt/ansible/bin/ansible-builder build --tag {{ ee_image }} --container-runtime docker`
+          then `minikube -p awx image load {{ ee_image }}`.
+          See 15-single-stack.md section 2b.
+        success_msg: "{{ ee_image }} is present in the awx minikube profile."
+
+    - name: Execution environment — ac6-ee
+      awx.awx.execution_environment:
+        name: "{{ ee_name }}"
+        image: "{{ ee_image }}"
+        organization: "{{ org }}"
+        pull: missing
+        state: present
+
     # ---------------------------------------------------------------- project
+    # default_environment sets it in ONE place rather than on every job
+    # template. AWX resolves an EE as: job template -> project -> organization
+    # -> global default, so the project is the narrowest place that covers all
+    # of this workshop's templates without touching anything else on the
+    # instance.
     - name: Project — AC6 POC
       awx.awx.project:
         name: "{{ project_name }}"
@@ -195,6 +245,7 @@
         scm_branch: "{{ scm_branch }}"
         scm_update_on_launch: true
         scm_clean: true
+        default_environment: "{{ ee_name }}"
         wait: true
         state: present
 

@@ -21,30 +21,39 @@
 #
 # Verified against Nautobot 3.2.3 and AWX 24.6.1.
 
+# 🔴 `hosts: all`, NOT `hosts: localhost` — see the long note in turnup_diff.yml.
+# AWX passes `--limit <device>`, which applies to every play, so a localhost
+# play matches nothing and is SKIPPED. Here that would skip the no-op guard
+# below, which is the one thing standing between a lost `apply: true` and a
+# false "approved and applied" entry in the audit trail.
 - name: Announce what was approved
-  hosts: localhost
-  connection: local
+  hosts: all
   gather_facts: false
 
   tasks:
-    - name: Report
-      ansible.builtin.debug:
-        msg:
-          - "Approved — applying to {{ device_name | default('the workflow limit') }}."
-          - "Mode: {{ 'APPLY (changes will be made)' if (apply | default(false) | bool) else 'CHECK ONLY — apply is not set, nothing will change' }}"
-          - "AWX job: {{ awx_job_id | default('local-run') }}"
+    - name: Announce
+      run_once: true
+      delegate_to: localhost
+      block:
+        - name: Report
+          ansible.builtin.debug:
+            msg:
+              - "Approved — applying to {{ device_name | default('the workflow limit') }}."
+              - "Mode: {{ 'APPLY (changes will be made)' if (apply | default(false) | bool) else 'CHECK ONLY — apply is not set, nothing will change' }}"
+              - "AWX job: {{ awx_job_id | default('local-run') }}"
 
-    # If this fires, the job template lost its extra_vars and the node would
-    # silently do nothing while reporting success — the worst possible outcome
-    # for an approval gate, because the record would say a change was applied.
-    - name: Refuse to run as a no-op
-      ansible.builtin.assert:
-        that: apply | default(false) | bool
-        fail_msg: >-
-          apply is not true, so this node would change nothing while still
-          reporting success — which would put a false "approved and applied"
-          entry in the audit trail. Set `apply: true` in the extra_vars of the
-          `Site Turnup - apply and write back` job template.
+        # If this fires, the job template lost its extra_vars and the node would
+        # silently do nothing while reporting success — the worst possible
+        # outcome for an approval gate, because the record would say a change
+        # was applied.
+        - name: Refuse to run as a no-op
+          ansible.builtin.assert:
+            that: apply | default(false) | bool
+            fail_msg: >-
+              apply is not true, so this node would change nothing while still
+              reporting success — which would put a false "approved and applied"
+              entry in the audit trail. Set `apply: true` in the extra_vars of
+              the `Site Turnup - apply and write back` job template.
 
 # Same playbook node 1 used, with apply=true this time.
 - name: Apply the approved configuration

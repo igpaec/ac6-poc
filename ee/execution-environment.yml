@@ -1,0 +1,89 @@
+---
+# Custom execution environment for the AC6 workshop.
+#
+# 🔴 WHY THIS EXISTS. The stock EE cannot run this workshop's collections.
+#
+# Measured 2026-09-02 on the first Lab 4 run. `quay.io/ansible/awx-ee:24.6.1`
+# — the newest tagged EE, matching our AWX — ships **ansible-core 2.15.12**:
+#
+#   [WARNING]: Collection networktocode.nautobot does not support Ansible version 2.15.12
+#   [WARNING]: Collection arista.eos does not support Ansible version 2.15.12
+#   fatal: [leaf1 -> localhost]: FAILED! => {"msg": "pynautobot must be installed to use this plugin"}
+#
+# Three problems, one image:
+#
+#   networktocode.nautobot   requires_ansible >= 2.17.0   EE has 2.15.12
+#   arista.eos               requires_ansible >= 2.16.0   EE has 2.15.12
+#   pynautobot               needed by graphql_info        absent
+#
+# ⚠️ Lab 1 hid this. Its inventory sync passes on the stock EE because the
+# Nautobot inventory *plugin* uses plain HTTP, needs no pynautobot, and treats
+# the version mismatch as a warning. Only a MODULE run surfaces it — which is
+# why "the playbooks work from the VM" proved so much less than it looked.
+#
+# ⚠️ `awx-ee:latest` is not the answer either. It is built from devel, so it
+# floats — the exact failure mode this project pins everything to avoid — and
+# it still would not carry pynautobot.
+#
+# ------------------------------------------------------------------ BUILDING
+#
+#   /opt/ansible/bin/pip install ansible-builder==3.1.1
+#   cd ~/ac6-poc/ee && /opt/ansible/bin/ansible-builder build --tag ac6-ee:1.0.0 --container-runtime docker
+#   minikube -p awx image load ac6-ee:1.0.0
+#
+# Then point AWX at it — `seed_awx.yml` does this, or by hand:
+#   Administration -> Execution Environments -> ac6-ee -> Image: ac6-ee:1.0.0
+#
+# `minikube image load` is the single-stack answer and needs no registry. For
+# 60 stacks this image has to be mirrored like every other — that is G10 /
+# the image-mirroring gap, deliberately not solved here.
+#
+# ⚠️ Pull policy must NOT be "always" for a locally loaded image — AWX would
+# try to fetch `ac6-ee:1.0.0` from a registry that has never heard of it.
+# seed_awx.yml sets `pull: missing`.
+
+version: 3
+
+images:
+  base_image:
+    # Pinned to the same version as AWX itself. We are layering onto it rather
+    # than starting from a bare base so we inherit the receptor/runner plumbing
+    # AWX expects an EE to have.
+    name: quay.io/ansible/awx-ee:24.6.1
+
+dependencies:
+  # The whole point of the rebuild. 2.18.19 matches the VM's venv from
+  # 01-server-prep.md, so a playbook behaves the same run by hand and run by
+  # AWX — which has not been true until now.
+  ansible_core:
+    package_pip: ansible-core==2.18.19
+
+  ansible_runner:
+    package_pip: ansible-runner
+
+  # 🔴 ONE SOURCE. Relative to THIS file — ansible-builder resolves dependency
+  # paths against the definition's own directory (user_definition.py,
+  # `reference_path = os.path.dirname(self.filename)`), so this is the same
+  # requirements file AWX uses at project-sync time. Do not copy it here; a
+  # second copy is exactly how the EE and the project drift apart.
+  galaxy: ../collections/requirements.yml
+
+  python:
+    # networktocode.nautobot's modules import this. The inventory plugin does
+    # not, which is why Lab 1 passed and Lab 2 did not.
+    - pynautobot==3.1.1
+    # arista.eos over network_cli. `ansible_network_cli_ssh_type: paramiko` is
+    # set in ansible.cfg, and no collection install provides the library —
+    # troubleshooting.md § 13 hit this on the VM, and a pod has even less.
+    - paramiko==5.0.0
+
+# Baking the collections in means AWX does NOT need to install them at project
+# sync time, which removes the Galaxy-credential trap (troubleshooting.md § 6)
+# and stops 60 stacks each hitting galaxy.ansible.com at session open.
+#
+# ⚠️ collections/requirements.yml still uses `>=` floors, so two builds on
+# different days can produce different collection versions. Pin them exactly
+# once a build is known good: `ansible-galaxy collection list` inside the
+# image, then rewrite the floors as `==`. Tracked with F11 (tag the repo).
+options:
+  package_manager_path: /usr/bin/dnf
