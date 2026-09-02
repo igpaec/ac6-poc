@@ -607,14 +607,37 @@
       delay: 10
       until: webhook_lookup is succeeded
 
-    # ⚠️ `{% raw %}` IS LOAD-BEARING — the same trap as the credential injector
-    # above. body_template is a Jinja2 template that NAUTOBOT renders, at
-    # webhook-send time, against its own context. Without the raw block Ansible
-    # would render `{{ data.name }}` here and store an empty string, and the
-    # webhook would POST a body with no device name in it. Nothing would error.
+    # 🔴 `!unsafe` IS LOAD-BEARING, AND `{% raw %}` IS NOT ENOUGH HERE.
     #
-    # Nautobot's context is: event, timestamp, model, username, request_id,
-    # data, snapshots (verified in nautobot/extras/tasks.py, process_webhook).
+    # body_template is a Jinja2 template that NAUTOBOT renders, at webhook-send
+    # time, against its own context: event, timestamp, model, username,
+    # request_id, data, snapshots (verified in nautobot/extras/tasks.py,
+    # process_webhook). Every `{{ ... }}` below must reach Nautobot untouched.
+    #
+    # The first attempt used `{% raw %}`, the same guard as the credential
+    # injector above, and it failed in two stacked ways:
+    #
+    #   1. `{% raw %}` protects exactly ONE render pass. set_fact renders it,
+    #      producing a real string full of live `{{ }}` — and then this task's
+    #      output is consumed by a LATER task, which templates its arguments
+    #      recursively and evaluates them for real:
+    #          "The task includes an option with an undefined variable ...
+    #           'data' is undefined"
+    #      `data` is Nautobot's, not Ansible's, so there is nothing to resolve.
+    #
+    #   2. Worse and quieter: the rendered string looks like a Python dict
+    #      literal, so Ansible literal_eval'd it and body_template became a
+    #      DICT. Even with the templating fixed, Nautobot's API expects a
+    #      string there and would have rejected it.
+    #
+    # `!unsafe` fixes both at once. It marks the scalar as AnsibleUnsafeText,
+    # which the templar refuses to render at any depth or in any later task —
+    # so no `{% raw %}` is needed, and no type conversion happens because no
+    # templating happens. The value stays the exact string written here.
+    #
+    # RULE: `{% raw %}` for a value used in the SAME task; `!unsafe` for a value
+    # that passes through a variable. The injector above is the first case; this
+    # is the second.
     #
     # `limit` targets the workflow at the one device that changed. Both the
     # workflow and its two job templates set ask_limit_on_launch, without which
@@ -639,8 +662,8 @@
           http_content_type: application/json
           additional_headers: "Authorization: Bearer {{ awx_token.ansible_facts.controller_token.token }}"
           ssl_verification: false
-          body_template: |
-            {% raw %}{
+          body_template: !unsafe |
+            {
               "extra_vars": {
                 "device_name": "{{ data.name }}",
                 "device_id": "{{ data.id }}",
@@ -650,7 +673,20 @@
                 "changed_by": "{{ username }}"
               },
               "limit": "{{ data.name }}"
-            }{% endraw %}
+            }
+
+    # Cheap guard against the failure mode above coming back. If body_template
+    # is ever a dict again, the API call would fail with a 400 that names a
+    # serializer field rather than the templating that caused it.
+    - name: Confirm the body template survived as an unrendered string
+      ansible.builtin.assert:
+        that:
+          - webhook_body.body_template is string
+          - "'data.name' in webhook_body.body_template"
+        fail_msg: >-
+          body_template was templated or type-converted before reaching
+          Nautobot. The `!unsafe` tag on it has been lost.
+        success_msg: body_template is an unrendered string, as Nautobot needs.
 
     - name: Create the webhook
       ansible.builtin.uri:
