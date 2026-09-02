@@ -5,19 +5,33 @@
 # /api/v2/ through the awx.awx collection. It touches no devices and no Nautobot.
 #
 # HOW TO RUN:
-#   export CONTROLLER_HOST="http://localhost:8013"
-#   export CONTROLLER_USERNAME="admin"
-#   export CONTROLLER_PASSWORD="AnsibleAC6"
-#   export CONTROLLER_VERIFY_SSL=false
 #   ansible-playbook playbooks/seed_awx.yml
 #
-# Those four env vars are read natively by every awx.awx module — the same
-# pattern the Nautobot inventory plugin uses for NAUTOBOT_URL / NAUTOBOT_TOKEN.
-# No credentials in this file, and nothing to pass on the command line.
+# That is the whole command. No exports, no --extra-vars.
 #
-# ⚠️ CONTROLLER_HOST is localhost here because this runs on the VM, alongside
-# the `kubectl port-forward`. That is NOT the address AWX jobs use to reach
-# Nautobot — see nautobot_url below.
+# 🔴 THIS PLAYBOOK DELIBERATELY DOES NOT REQUIRE CONTROLLER_* ENV VARS.
+#
+# An earlier revision asserted CONTROLLER_HOST / CONTROLLER_USERNAME /
+# CONTROLLER_PASSWORD were exported and failed the run if they were not. That
+# cost time twice, and it was the wrong design:
+#
+#   * The values are DETERMINISTIC. Every stack is http://localhost:8013 with
+#     admin/AnsibleAC6 — see proctor/00-credentials-and-addressing.md. The
+#     project's own rule is to hardcode static literals rather than look them
+#     up, and this file already hardcodes the Nautobot API token below.
+#   * Env vars are shell state. They vanish on a new SSH session, a `sudo -i`,
+#     a cron job, a systemd unit, or any non-interactive shell that skips
+#     .bashrc — every one of which provisioning will eventually run in (G2).
+#   * The failure was a bare assertion, which reads as "you did something
+#     wrong" rather than "AWX was never asked".
+#
+# The literals below are therefore DEFAULTS, and the CONTROLLER_* env vars
+# still override them if set. Exporting them remains fine; it is no longer
+# load-bearing.
+#
+# ⚠️ awx_url is localhost because this runs on the VM, alongside the
+# `kubectl port-forward`. That is NOT the address AWX jobs use to reach
+# Nautobot — see nautobot_url_from_pods below.
 #
 # IDEMPOTENT. Safe to re-run, and that is the point: this is the seed of
 # reset.sh (G5). Re-running restores every object to the state a lab expects.
@@ -35,7 +49,27 @@
   connection: local
   gather_facts: false
 
+  # Applies these to every awx.awx module in the play. `controller` is an action
+  # group declared in the collection's meta/runtime.yml, and it covers every
+  # module used here — credential_type, credential, project, inventory,
+  # inventory_source, job_template, token, and the workflow_* modules Lab 4
+  # will need. One block instead of four arguments on fifteen tasks.
+  module_defaults:
+    group/awx.awx.controller:
+      controller_host: "{{ awx_url }}"
+      controller_username: "{{ awx_username }}"
+      controller_password: "{{ awx_password }}"
+      validate_certs: false
+
   vars:
+    # Static literals, overridable by the env vars for anyone who prefers them.
+    # `| default(x, true)` — the second argument matters: it treats an EMPTY
+    # string as unset, which a bare `| default(x)` does not, and an unset env
+    # var comes back as "" not undefined.
+    awx_url: "{{ lookup('env', 'CONTROLLER_HOST') | default('http://localhost:8013', true) }}"
+    awx_username: "{{ lookup('env', 'CONTROLLER_USERNAME') | default('admin', true) }}"
+    awx_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') | default('AnsibleAC6', true) }}"
+
     org: Default
     project_name: AC6 POC
     scm_url: https://github.com/igpaec/ac6-poc.git
@@ -53,15 +87,34 @@
     device_password: admin
 
   tasks:
-    - name: Fail early if AWX credentials are missing
+    # Pre-flight against the thing that ACTUALLY breaks. Credentials are static,
+    # so they are never the problem; the port-forward is, constantly. It is a
+    # foreground process that dies on SSH disconnect and on reboot, and without
+    # it every awx.awx task below fails with a connection error that names the
+    # module rather than the cause.
+    #
+    # /api/v2/ping/ is unauthenticated, so a 200 proves reachability alone. The
+    # first real module call is what proves the password.
+    - name: Check AWX is reachable before doing anything else
+      ansible.builtin.uri:
+        url: "{{ awx_url }}/api/v2/ping/"
+        method: GET
+        validate_certs: false
+        timeout: 10
+      register: awx_ping
+      failed_when: false
+      changed_when: false
+
+    - name: Explain it if AWX is not answering
       ansible.builtin.assert:
-        that:
-          - lookup('env', 'CONTROLLER_HOST') | length > 0
-          - lookup('env', 'CONTROLLER_USERNAME') | length > 0
-          - lookup('env', 'CONTROLLER_PASSWORD') | length > 0
+        that: awx_ping.status == 200
         fail_msg: >-
-          CONTROLLER_HOST, CONTROLLER_USERNAME and CONTROLLER_PASSWORD must be
-          exported. See the header of this file.
+          No answer from AWX at {{ awx_url }} (got {{ awx_ping.status }}).
+          Almost always the port-forward: it is a foreground process and does
+          not survive a reboot or an SSH disconnect. Restart it with
+          `nohup kubectl -n awx port-forward --address 0.0.0.0 svc/awx-poc-service 8013:80 > /tmp/awx-port-forward.log 2>&1 &`
+          then re-run this playbook.
+        success_msg: "AWX {{ awx_ping.json.version | default('?') }} answering at {{ awx_url }}"
 
     # ------------------------------------------------- custom credential type
     # Input configuration = the form fields. Injector = how they reach the job.
