@@ -37,6 +37,11 @@
     mgmt_prefix: 172.20.20.0/24
     mgmt_interface: Management0
 
+    # Nautobot clones this itself to discover the Jobs in jobs/ — so it must be
+    # a URL Nautobot's worker can reach, not a local path.
+    lab_repo_url: https://github.com/igpaec/ac6-poc.git
+    lab_repo_branch: main
+
     # These MUST match clab/poc.clab.yml's pinned mgmt-ipv4 values, and the
     # literals printed in the attendee labs. Lab 1's dynamic inventory builds
     # ansible_host from primary_ip4, so a mismatch here sends every playbook to
@@ -360,6 +365,122 @@
             - "{{ role_leaf.role.id }}"
           data: "{{ leaf_base_context }}"
         status_code: [200, 201]
+
+    # ------------------------------------------- Secrets Group (Lab 3c)
+    # Lab 3c asks attendees to compare Nautobot's way of holding device
+    # credentials with AWX's, and to decide which should own them. Without a
+    # Secrets Group to look at, one side of that comparison is an empty list.
+    #
+    # Deliberately an ENVIRONMENT-VARIABLE secret, not a literal: the lesson is
+    # that Nautobot stores a *reference* to a secret and binds it to a device —
+    # it does not store the secret itself. The variable need not exist for the
+    # object to be worth looking at.
+    - name: Secret — device password reference
+      networktocode.nautobot.secret:
+        <<: *nb
+        name: cEOS admin password
+        provider: environment-variable
+        parameters:
+          variable: NAPALM_PASSWORD
+        description: >-
+          A pointer, not a password. Nautobot resolves this at use time from the
+          worker's environment — the value never lives in the database.
+        state: present
+
+    - name: Secrets Group — cEOS device access
+      networktocode.nautobot.secrets_group:
+        <<: *nb
+        name: cEOS device access
+        description: >-
+          Lab 3c compares this with the AWX Machine credential. Same job, two
+          places it could live — see the lab for why picking one matters.
+        state: present
+
+    - name: Bind the secret into the group
+      networktocode.nautobot.secrets_groups_association:
+        <<: *nb
+        secrets_group: cEOS device access
+        secret: cEOS admin password
+        access_type: Generic
+        secret_type: password
+        state: present
+
+    # ------------------------------------------- Git Repository + Jobs (Lab 3a)
+    # This is what puts the "Run in AWX" button on a device page.
+    #
+    # There is no git_repository module in networktocode.nautobot 6.2.0, so the
+    # repository goes through the REST API — same look-then-POST-or-PATCH shape
+    # as the Config Context above. Field names verified against Nautobot 3.2.3's
+    # GitRepository model: name, remote_url, branch, provided_contents.
+    - name: Look up the Git Repository
+      ansible.builtin.uri:
+        url: "{{ nb.url }}/api/extras/git-repositories/?name=ac6-poc"
+        method: GET
+        headers: *nb_headers
+        status_code: 200
+      register: repo_lookup
+
+    - name: Git Repository — the lab repo, providing jobs
+      ansible.builtin.uri:
+        url: >-
+          {{ nb.url }}/api/extras/git-repositories/{{
+          (repo_lookup.json.results | first).id ~ '/' if repo_lookup.json.count > 0 else '' }}
+        method: "{{ 'PATCH' if repo_lookup.json.count > 0 else 'POST' }}"
+        headers: *nb_headers
+        body_format: json
+        body:
+          name: ac6-poc
+          remote_url: "{{ lab_repo_url }}"
+          branch: "{{ lab_repo_branch }}"
+          provided_contents:
+            - extras.job
+        status_code: [200, 201]
+      register: repo_result
+
+    # Sync is a POST to the repository's /sync/ action. It enqueues a background
+    # job, so the Jobs below do not exist the instant this returns.
+    - name: Sync the Git Repository
+      ansible.builtin.uri:
+        url: "{{ nb.url }}/api/extras/git-repositories/{{ repo_result.json.id }}/sync/"
+        method: POST
+        headers: *nb_headers
+        status_code: [200, 201, 202]
+
+    - name: Wait for the Job to be imported
+      ansible.builtin.uri:
+        url: "{{ nb.url }}/api/extras/jobs/?name=Launch%20AWX%20job%20for%20this%20device"
+        method: GET
+        headers: *nb_headers
+        status_code: 200
+      register: job_lookup
+      until: job_lookup.json.count > 0
+      retries: 12
+      delay: 5
+
+    # 🔴 Jobs import DISABLED. Nautobot will not run one until this is flipped,
+    # and the failure is silent from the button's point of view.
+    - name: Enable the Job
+      ansible.builtin.uri:
+        url: "{{ nb.url }}/api/extras/jobs/{{ (job_lookup.json.results | first).id }}/"
+        method: PATCH
+        headers: *nb_headers
+        body_format: json
+        body:
+          enabled: true
+        status_code: 200
+
+    - name: Job Button — Run in AWX
+      networktocode.nautobot.job_button:
+        <<: *nb
+        name: Run in AWX
+        content_types:
+          - dcim.device
+        job: Launch AWX job for this device
+        text: Run in AWX
+        button_class: primary
+        enabled: true
+        confirmation: false
+        state: present
 
     # ------------------------------------------------------------ verification
     - name: Next step
