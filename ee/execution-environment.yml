@@ -111,6 +111,48 @@ dependencies:
     # importable by the interpreter everything else now runs on.
     - receptorctl
 
+  # 🔴 WITHOUT THIS THE BUILD FAILS ON A COLLECTION WE DO NOT USE.
+  #
+  #   azure-cli-core 2.61.0 depends on paramiko<4.0.0 and >=2.0.8
+  #   ERROR: ResolutionImpossible
+  #
+  # awx-ee is a kitchen-sink image: it bakes in thirteen cloud and platform
+  # collections. ansible-builder's `introspect.py` scans EVERY installed
+  # collection — including the ones that arrived in the base image — and merges
+  # their requirements.txt into one pip resolve. So `azure.azcollection` pulls
+  # `azure-cli-core`, which caps paramiko below 4, and our `paramiko==5.0.0`
+  # makes the set unsolvable.
+  #
+  # Two ways out, and the obvious one is wrong: dropping our paramiko pin lets
+  # pip settle on 3.x and reintroduces exactly the host/EE divergence this
+  # image exists to remove. Excluding the collections we do not use is the
+  # correct fix, and it makes the build markedly faster — azure-cli-core alone
+  # is a large dependency tree we would be compiling for nothing.
+  #
+  # ⚠️ These collections REMAIN IN THE IMAGE, just without their Python
+  # dependencies. Nothing in this workshop touches them. If a stretch goal ever
+  # does, it needs removing from this list, not adding back by hand.
+  #
+  # List taken from awx-ee's own execution-environment.yml on `devel` (the
+  # 24.6.1 image was built from it; the repo has no release branches). **Naming
+  # a collection that is not present is harmless** — the exclusion simply never
+  # matches — so an over-broad list is the safe direction to be wrong in.
+  exclude:
+    all_from_collections:
+      - amazon.aws
+      - ansible.posix
+      - ansible.windows
+      - awx.awx
+      - azure.azcollection
+      - community.vmware
+      - google.cloud
+      - kubernetes.core
+      - kubevirt.core
+      - openstack.cloud
+      - ovirt.ovirt
+      - redhatinsights.insights
+      - theforeman.foreman
+
 # Baking the collections in means AWX does NOT need to install them at project
 # sync time, which removes the Galaxy-credential trap (troubleshooting.md § 6)
 # and stops 60 stacks each hitting galaxy.ansible.com at session open.
