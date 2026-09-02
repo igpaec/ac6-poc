@@ -61,8 +61,10 @@
     poc_devices:
       - name: leaf1
         mgmt_ip: 172.20.20.11/24
+        eth1_description: to leaf2 Ethernet1
       - name: leaf2
         mgmt_ip: 172.20.20.12/24
+        eth1_description: to leaf1 Ethernet1
 
     # ---------------------------------------------------------- Lab 2 content
     # Same keys as inventory/group_vars/leaf.yml, deliberately. Lab 2 deletes
@@ -273,6 +275,29 @@
     # `ip_addresses` is a DICT, not a list:
     #   state:   merge (default) | replace | delete
     #   objects: list of dicts, each with an `ip_address` key
+    #
+    # 🔴 `replace`, NOT the default `merge`. This one bit hard on 2026-09-02.
+    #
+    # `merge` "adds associations without removing existing ones". So when the
+    # ContainerLab addresses were corrected from .2/.3 to .11/.12 and this
+    # playbook was re-run, it ADDED the new IPs and left the old ones bound.
+    # Management0 on leaf2 ended up holding both 172.20.20.2/24 and
+    # 172.20.20.12/24, and nothing anywhere said so:
+    #
+    #   * `primary_ip4` was correct, so the dynamic inventory worked
+    #   * every playbook reached the device fine
+    #   * the GraphQL query returns ip_addresses as a LIST, so full_config.j2
+    #     rendered `ip address 172.20.20.2/24` into the intent
+    #
+    # It surfaced only when Lab 4 ran the first-ever `apply=true`: the commit
+    # renumbered Management0 out from under its own SSH session, `commit` never
+    # returned a prompt, and the job died with a 60-second timeout while the
+    # device silently moved to the wrong address.
+    #
+    # `replace` "enforces exactly the listed associations, removing any extras",
+    # which is what a seed playbook should always mean. **A seed that only adds
+    # is not idempotent — it is cumulative**, and the difference is invisible
+    # until something reads the whole list instead of just the primary.
     - name: Management interfaces (with IPs bound)
       networktocode.nautobot.device_interface:
         <<: *nb
@@ -282,9 +307,31 @@
         mgmt_only: true
         status: Active
         ip_addresses:
-          state: merge
+          state: replace
           objects:
             - ip_address: "{{ item.mgmt_ip }}"
+        state: present
+      loop: "{{ poc_devices }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # A real data interface, so intent has something to say that is not the
+    # out-of-band port. Added 2026-09-02 alongside the mgmt_only guard in
+    # full_config.j2 — with Management0 excluded from rendered config, the
+    # interface section of the template would otherwise be empty and Lab 2
+    # would lose half its point.
+    #
+    # No IP: leaf1:eth1 <-> leaf2:eth1 is a plain L2 link in the topology.
+    - name: Data interfaces
+      networktocode.nautobot.device_interface:
+        <<: *nb
+        device: "{{ item.name }}"
+        name: Ethernet1
+        type: 1000base-t
+        mgmt_only: false
+        enabled: true
+        status: Active
+        description: "{{ item.eth1_description }}"
         state: present
       loop: "{{ poc_devices }}"
       loop_control:

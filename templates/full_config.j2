@@ -27,7 +27,26 @@ logging host {{ device.config_context['syslog_host'] }}
 {% endif %}
 {% endif %}
 !
-{% for intf in device.interfaces | default([]) %}
+{#
+  🔴 NEVER RENDER CONFIG FOR THE OUT-OF-BAND PORT.
+
+  Applying intent to the management interface, over the management interface,
+  is how you disconnect yourself mid-commit. It happened on 2026-09-02: a stale
+  IP left in Nautobot rendered `ip address 172.20.20.2/24` onto leaf2's
+  Management0, whose real address is .12. The commit renumbered the interface,
+  the SSH session died, `commit` never returned a prompt, and the job failed
+  with a 60-second timeout — after the device had already moved.
+
+  The stale IP was the bug and is fixed in seed_nautobot.yml (`state: replace`).
+  This guard is the second line of defence: with it, no data error in Nautobot
+  can take a device off the network. In front of sixty people that difference
+  matters more than the config it would have applied.
+
+  Note `default(false)` — if the GraphQL query ever stops returning mgmt_only,
+  this fails OPEN rather than silently skipping every interface and rendering
+  an empty intent that looks like "no drift".
+#}
+{% for intf in device.interfaces | default([]) if not intf.get('mgmt_only', false) %}
 interface {{ intf.name }}
 {% if intf.description %}
    description {{ intf.description }}
